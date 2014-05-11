@@ -1,0 +1,1 @@
+#define	NESS	0

@@ -1,0 +1,1 @@
+#define	NWSDISPLAY	1

@@ -1,0 +1,1 @@
+#define	NPCKBC	1

@@ -1,0 +1,1 @@
+#define	NENC	1

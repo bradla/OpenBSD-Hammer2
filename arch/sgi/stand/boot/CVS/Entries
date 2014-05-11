@@ -1,0 +1,13 @@
+/Makefile/1.15/Fri Aug 31 08:14:08 2012//
+/arcbios.c/1.20/Sat Mar 29 18:09:30 2014//
+/boot.c/1.24/Sat Feb 22 20:27:21 2014//
+/conf.c/1.5/Mon Mar 19 17:38:31 2012//
+/diskio.c/1.7/Mon Mar 19 17:38:31 2012//
+/filesystem.c/1.3/Mon Mar 19 17:38:31 2012//
+/netfs.c/1.1/Mon Mar 19 17:38:31 2012//
+/netfs.h/1.1/Mon Mar 19 17:38:31 2012//
+/netio.c/1.1/Mon Mar 19 17:38:31 2012//
+/start.S/1.4/Sat Sep 29 21:40:48 2012//
+/strstr.c/1.2/Sat May 30 03:59:27 2009//
+/version/1.6/Sat Feb 22 20:27:21 2014//
+D

@@ -1,0 +1,44 @@
+#	$OpenBSD: files.mips64,v 1.22 2014/03/22 00:01:04 miod Exp $
+
+file	arch/mips64/mips64/arcbios.c		arcbios
+file	arch/mips64/mips64/clock.c		clock
+file	arch/mips64/mips64/cpu.c
+file	arch/mips64/mips64/interrupt.c
+file	arch/mips64/mips64/mem.c
+file	arch/mips64/mips64/mips64_machdep.c
+file	arch/mips64/mips64/pmap.c
+file	arch/mips64/mips64/process_machdep.c
+file	arch/mips64/mips64/sendsig.c
+file	arch/mips64/mips64/softintr.c
+file	arch/mips64/mips64/sys_machdep.c
+file	arch/mips64/mips64/trap.c
+file	arch/mips64/mips64/vm_machdep.c
+
+file	arch/mips64/mips64/cache_loongson2.c	cpu_loongson2
+file	arch/mips64/mips64/cache_octeon.c	cpu_octeon
+file	arch/mips64/mips64/cache_r4k.c		cpu_r4000
+file	arch/mips64/mips64/cache_r5k.c		cpu_r5000 | cpu_rm7000
+file	arch/mips64/mips64/cache_r10k.c		cpu_r10000
+file	arch/mips64/mips64/cache_tfp.c		cpu_r8000
+file	arch/mips64/mips64/cache_tfp_subr.S	cpu_r8000
+file	arch/mips64/mips64/context.S
+file	arch/mips64/mips64/cp0access.S
+file	arch/mips64/mips64/exception.S		!cpu_r8000
+file	arch/mips64/mips64/exception_tfp.S	cpu_r8000
+file	arch/mips64/mips64/fp_emulate.c
+file	arch/mips64/mips64/lcore_access.S
+file	arch/mips64/mips64/lcore_float.S
+file	arch/mips64/mips64/r4000_errata.c	cpu_r4000
+file	arch/mips64/mips64/tlbhandler.S		!cpu_r8000
+file	arch/mips64/mips64/tlb_tfp.S		cpu_r8000
+
+file	arch/mips64/mips64/db_disasm.c		ddb
+file	arch/mips64/mips64/db_machdep.c		ddb
+file	arch/mips64/mips64/lcore_ddb.S		ddb|debug
+
+file	arch/mips64/mips64/ipifuncs.c           multiprocessor
+
+file	netinet/in_cksum.c			inet
+file	netinet/in4_cksum.c			inet
+
+file	lib/libkern/softfloat.c

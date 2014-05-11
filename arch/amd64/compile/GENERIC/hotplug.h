@@ -1,0 +1,1 @@
+#define	NHOTPLUG	1

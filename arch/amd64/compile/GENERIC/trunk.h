@@ -1,0 +1,1 @@
+#define	NTRUNK	1

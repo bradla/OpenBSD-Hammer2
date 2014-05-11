@@ -1,0 +1,170 @@
+#	$OpenBSD: genassym.cf,v 1.30 2014/04/01 09:05:03 mpi Exp $
+#	Written by Artur Grabowski art@openbsd.org, Public Domain
+
+include <sys/param.h>
+include <sys/proc.h>
+include <sys/resourcevar.h>
+include <sys/device.h>
+include <sys/user.h>
+
+include <uvm/uvm_extern.h>
+
+include <machine/trap.h>
+include <machine/pmap.h>
+include <machine/pte.h>
+include <machine/vmparam.h>
+include <machine/intr.h>
+include <machine/pic.h>
+include <machine/tss.h>
+include <machine/i82093var.h>
+include <machine/mutex.h>
+
+export	SRUN
+export	SONPROC
+
+export	L4_SLOT_KERNBASE
+define	L3_SLOT_KERNBASE	pl3_pi(KERNBASE)
+define	L2_SLOT_KERNBASE	pl2_pi(KERNBASE)
+define	L1_SLOT_KERNBASE	pl1_pi(KERNBASE)
+
+export	VM_MAXUSER_ADDRESS
+export	VM_MIN_KERNEL_ADDRESS
+
+struct	proc
+member	p_addr
+member	p_priority
+member	p_stat
+member	p_wchan
+member	P_MD_REGS	p_md.md_regs
+member	P_MD_FLAGS	p_md.md_flags
+member	P_MD_ASTPENDING	p_md.md_astpending
+member	p_flag
+member	p_cpu
+
+export	P_SYSTEM
+
+export	MDP_IRET
+
+struct	uvmexp		V_
+member	INTR		intrs
+
+struct	trapframe
+member	tf_rdi
+member	tf_rsi
+member	tf_rdx
+member	tf_rcx
+member	tf_r8
+member	tf_r9
+member	tf_r10
+member	tf_r11
+member	tf_r12
+member	tf_r13
+member	tf_r14
+member	tf_r15
+member	tf_rbp
+member	tf_rbx
+member	tf_rax
+member	tf_gs
+member	tf_fs
+member	tf_es
+member	tf_ds
+member	tf_trapno
+member	tf_err
+member	tf_rip
+member	tf_cs
+member	tf_rflags
+member	tf_rsp
+member	tf_ss
+
+define  FRAMESIZE               sizeof(struct trapframe)
+
+struct pcb
+member	pcb_cr3
+member	pcb_rsp
+member	pcb_rbp
+member	pcb_kstack
+member	pcb_fsbase
+member	pcb_onfault
+member	pcb_fpcpu
+member	pcb_pmap
+member	pcb_cr0
+
+struct pmap
+member	pm_cpus
+
+struct x86_64_tss
+member	tss_rsp0
+
+struct	cpu_info
+member	CPU_INFO_SCRATCH	ci_scratch
+member  CPU_INFO_SELF		ci_self
+member  CPU_INFO_CPUID		ci_cpuid
+member  CPU_INFO_APICID		ci_apicid
+member  CPU_INFO_RESCHED	ci_want_resched
+member  CPU_INFO_CURPROC	ci_curproc
+member  CPU_INFO_CURPCB		ci_curpcb
+member  CPU_INFO_IDLE_PCB	ci_idle_pcb
+member	CPU_INFO_ILEVEL		ci_ilevel
+member	CPU_INFO_IDEPTH		ci_idepth
+member	CPU_INFO_ISOURCES	ci_isources
+member	CPU_INFO_IPENDING	ci_ipending
+member	CPU_INFO_IUNMASK	ci_iunmask
+ifdef DIAGNOSTIC
+member	CPU_INFO_MUTEX_LEVEL	ci_mutex_level
+endif
+member	CPU_INFO_GDT		ci_gdt
+member	CPU_INFO_TSS		ci_tss
+
+struct	intrsource
+member	is_recurse
+member	is_resume
+member	is_handlers
+member	is_pic
+member	is_flags
+member	is_pin
+member	is_type
+member	is_maxlevel
+
+struct	intrhand
+member	ih_fun
+member	ih_arg
+member	ih_next
+member	ih_level
+member	IH_COUNT	ih_count.ec_count
+
+struct	ioapic_softc
+member	IOAPIC_SC_REG	sc_reg
+member	IOAPIC_SC_DATA	sc_data
+
+struct	mutex
+member	mtx_wantipl
+member	mtx_oldipl
+member	mtx_owner
+
+# pte fields
+export	PG_V
+export	PG_KR
+export	PG_KW
+export	PG_N
+export	PG_NX
+export	PG_G
+export	PG_PS
+
+# pmap constants
+export	PDIR_SLOT_PTE
+
+export	NKL4_KIMG_ENTRIES
+export	NKL3_KIMG_ENTRIES
+export	NKL2_KIMG_ENTRIES
+
+export	NDML4_ENTRIES
+export	NDML3_ENTRIES
+export	NDML2_ENTRIES
+
+export	NBPD_L2
+export	NPDPG
+
+export	PDIR_SLOT_DIRECT
+
+export	CR4_DEFAULT
+
