@@ -1,0 +1,19 @@
+/dpclock.c/1.2/Wed Oct  3 22:46:09 2012//
+/dsclock.c/1.4/Wed Oct  3 22:46:09 2012//
+/files.hpc/1.5/Fri Apr 18 21:55:24 2014//
+/hpc.c/1.16/Sat Sep 28 14:00:00 2013//
+/hpcdma.c/1.1/Wed Mar 28 20:44:23 2012//
+/hpcdma.h/1.1/Wed Mar 28 20:44:23 2012//
+/hpcreg.h/1.1/Wed Mar 28 20:44:23 2012//
+/hpcvar.h/1.8/Sun May 27 14:27:08 2012//
+/if_sq.c/1.9/Sat Aug 17 15:50:06 2013//
+/if_sqvar.h/1.4/Mon May 28 17:03:36 2012//
+/iocreg.h/1.2/Sun Apr  8 22:08:25 2012//
+/panel.c/1.2/Mon Nov  4 11:57:26 2013//
+/pckbc_hpc.c/1.2/Wed Oct  3 22:46:09 2012//
+/wdsc.c/1.4/Sat May 18 23:13:07 2013//
+/wskbdmap_sgi.c/1.1/Tue Apr 17 22:06:33 2012//
+/z8530kbd.c/1.5/Sun Jan 26 17:48:07 2014//
+/z8530ms.c/1.1/Tue Apr 17 22:06:33 2012//
+/zs.c/1.11/Mon Oct 21 12:14:51 2013//
+D

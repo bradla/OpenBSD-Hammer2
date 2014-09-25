@@ -1,0 +1,1 @@
+#define	NBTHUB	0

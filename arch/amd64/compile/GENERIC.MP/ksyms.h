@@ -1,0 +1,1 @@
+#define	NKSYMS	1

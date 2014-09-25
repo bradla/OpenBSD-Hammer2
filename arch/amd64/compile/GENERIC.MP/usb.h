@@ -1,0 +1,1 @@
+#define	NUSB	1

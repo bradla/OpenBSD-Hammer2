@@ -1,0 +1,1 @@
+#define	NSAFTE	1

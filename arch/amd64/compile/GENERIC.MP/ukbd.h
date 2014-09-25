@@ -1,0 +1,1 @@
+#define	NUKBD	1

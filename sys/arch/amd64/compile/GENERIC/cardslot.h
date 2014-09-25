@@ -1,0 +1,1 @@
+#define	NCARDSLOT	1

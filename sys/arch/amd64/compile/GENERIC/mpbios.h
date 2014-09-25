@@ -1,0 +1,1 @@
+#define	NMPBIOS	1

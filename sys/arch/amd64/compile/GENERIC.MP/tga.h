@@ -1,0 +1,1 @@
+#define	NTGA	0

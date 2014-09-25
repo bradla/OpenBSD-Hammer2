@@ -1,0 +1,18 @@
+/Makefile/1.1/Sun Nov 25 18:25:34 2007//
+/__divl.S/1.1/Sun Nov 25 18:25:34 2007//
+/__divlu.S/1.1/Sun Nov 25 18:25:34 2007//
+/__divq.S/1.1/Sun Nov 25 18:25:34 2007//
+/__divqu.S/1.1/Sun Nov 25 18:25:34 2007//
+/__reml.S/1.1/Sun Nov 25 18:25:34 2007//
+/__remlu.S/1.1/Sun Nov 25 18:25:34 2007//
+/__remq.S/1.1/Sun Nov 25 18:25:34 2007//
+/__remqu.S/1.1/Sun Nov 25 18:25:34 2007//
+/bcopy.S/1.4/Thu Jun 13 02:25:19 2013//
+/bzero.S/1.2/Thu Oct 31 00:43:16 1996//
+/divrem.m4/1.3/Thu Oct 31 00:43:17 1996//
+/ffs.S/1.1/Thu Oct 31 00:43:18 1996//
+/htonl.S/1.5/Mon Jun  3 05:39:02 2013//
+/htons.S/1.5/Mon Jun  3 05:39:02 2013//
+/memcpy.S/1.4/Thu Jun 13 02:25:19 2013//
+/memmove.S/1.5/Sat Jun 15 18:51:44 2013//
+D

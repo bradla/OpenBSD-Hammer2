@@ -1,0 +1,1 @@
+#define	NPCPPI	1

@@ -1,0 +1,1 @@
+#define	NARIA	0

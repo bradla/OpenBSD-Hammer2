@@ -1,0 +1,1 @@
+#define	NPFSYNC	1

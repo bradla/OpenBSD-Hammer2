@@ -1,0 +1,1 @@
+#define	NPAS	0

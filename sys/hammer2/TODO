@@ -1,0 +1,142 @@
+
+* transaction on cluster - multiple trans structures, subtrans
+
+* inode always contains target cluster/chain, not hardlink
+
+* cluster_modify_ip -> data returned mod to all chains
+* and hammer2_cluster_data() -> same thing
+
+* chain refs in cluster, cluster refs
+
+* check inode shared lock ... can end up in endless loop if following
+  hardlink because ip->chain is not updated in the exclusive lock cycle
+  when following hardlink.
+
+cpdup /build/boomdata/jails/bleeding-edge/usr/share/man/man4 /mnt/x3
+
+
+        * The block freeing code.  At the very least a bulk scan is needed
+          to implement freeing blocks.
+
+        * Crash stability.  Right now the allocation table on-media is not
+          properly synchronized with the flush.  This needs to be adjusted
+          such that H2 can do an incremental scan on mount to fixup
+          allocations on mount as part of its crash recovery mechanism.
+
+        * We actually have to start checking and acting upon the CRCs being
+          generated.
+
+        * Remaining known hardlink issues need to be addressed.
+
+        * Core 'copies' mechanism needs to be implemented to support multiple
+          copies on the same media.
+
+        * Core clustering mechanism needs to be implemented to support
+          mirroring and basic multi-master operation from a single host
+          (multi-host requires additional network protocols and won't
+          be as easy).
+
+* make sure we aren't using a shared lock during RB_SCAN's?
+
+* overwrite in write_file case w/compression - if device block size changes
+  the block has to be deleted and reallocated.  See hammer2_assign_physical()
+  in vnops.
+
+* freemap / clustering.  Set block size on 2MB boundary so the cluster code
+  can be used for reading.
+
+* need API layer for shared buffers (unfortunately).
+
+* add magic number to inode header, add parent inode number too, to
+  help with brute-force recovery.
+
+* modifications past our flush point do not adjust vchain.
+  need to make vchain dynamic so we can (see flush_scan2).??
+
+* MINIOSIZE/RADIX set to 1KB for now to avoid buffer cache deadlocks
+  on multiple locked inodes.  Fix so we can use LBUFSIZE!  Or,
+  alternatively, allow a smaller I/O size based on the sector size
+  (not optimal though).
+
+* When making a snapshot, do not allow the snapshot to be mounted until
+  the in-memory chain has been freed in order to break the shared core.
+
+* Snapshotting a sub-directory does not snapshot any
+  parent-directory-spanning hardlinks.
+
+* Snapshot / flush-synchronization point.  remodified data that crosses
+  the synchronization boundary is not currently reallocated.  see
+  hammer2_chain_modify(), explicit check (requires logical buffer cache
+  buffer handling).
+
+* on fresh mount with multiple hardlinks present separate lookups will
+  result in separate vnodes pointing to separate inodes pointing to a
+  common chain (the hardlink target).
+
+  When the hardlink target consolidates upward only one vp/ip will be
+  adjusted.  We need code to fixup the other chains (probably put in
+  inode_lock_*()) which will be pointing to an older deleted hardlink
+  target.
+
+* Filesystem must ensure that modify_tid is not too large relative to
+  the iterator in the volume header, on load, or flush sequencing will
+  not work properly.  We should be able to just override it, but we
+  should complain if it happens.
+
+* Kernel-side needs to clean up transaction queues and make appropriate
+  callbacks.
+
+* Userland side needs to do the same for any initiated transactions.
+
+* Nesting problems in the flusher.
+
+* Inefficient vfsync due to thousands of file buffers, one per-vnode.
+  (need to aggregate using a device buffer?)
+
+* Use bp->b_dep to interlock the buffer with the chain structure so the
+  strategy code can calculate the crc and assert that the chain is marked
+  modified (not yet flushed).
+
+* Deleted inode not reachable via tree for volume flush but still reachable
+  via fsync/inactive/reclaim.  Its tree can be destroyed at that point.
+
+* The direct write code needs to invalidate any underlying physical buffers.
+  Direct write needs to be implemented.
+
+* Make sure a resized block (hammer2_chain_resize()) calculates a new
+  hash code in the parent bref
+
+* The freemap allocator needs to getblk/clrbuf/bdwrite any partial
+  block allocations (less than 64KB) that allocate out of a new 64K
+  block, to avoid causing a read-before-write I/O.
+
+* Check flush race upward recursion setting SUBMODIFIED vs downward
+  recursion checking SUBMODIFIED then locking (must clear before the
+  recursion and might need additional synchronization)
+
+* There is definitely a flush race in the hardlink implementation between
+  the forwarding entries and the actual (hidden) hardlink inode.
+
+  This will require us to associate a small hard-link-adjust structure
+  with the chain whenever we create or delete hardlinks, on top of
+  adjusting the hardlink inode itself.  Any actual flush to the media
+  has to synchronize the correct nlinks value based on whether related
+  created or deleted hardlinks were also flushed.
+
+* When a directory entry is created and also if an indirect block is
+  created and entries moved into it, the directory seek position can
+  potentially become incorrect during a scan.
+
+* When a directory entry is deleted a directory seek position depending
+  on that key can cause readdir to skip entries.
+
+* TWO PHASE COMMIT - store two data offsets in the chain, and
+  hammer2_chain_delete() needs to leave the chain intact if MODIFIED2 is
+  set on its buffer until the flusher gets to it?
+
+
+				OPTIMIZATIONS
+
+* If a file is unlinked buts its descriptors is left open and used, we
+  should allow data blocks on-media to be reused since there is no
+  topology left to point at them.

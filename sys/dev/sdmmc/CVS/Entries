@@ -1,0 +1,20 @@
+/Makefile/1.1/Thu Jun  1 21:15:40 2006//
+/devlist2h.awk/1.2/Fri Jun  2 21:16:44 2006//
+/files.sdmmc/1.3/Thu May 31 18:45:09 2007//
+/sbt.c/1.17/Tue Aug 24 14:52:23 2010//
+/sdhc.c/1.37/Fri Dec  6 21:03:04 2013//
+/sdhcreg.h/1.4/Sun Jul 30 17:20:40 2006//
+/sdhcvar.h/1.6/Sun Jul 31 16:55:01 2011//
+/sdmmc.c/1.33/Wed Mar  5 21:35:21 2014//
+/sdmmc_cis.c/1.5/Tue Aug 24 14:52:23 2010//
+/sdmmc_io.c/1.19/Tue Aug 24 14:52:23 2010//
+/sdmmc_ioreg.h/1.4/Sat Jun  2 01:48:37 2007//
+/sdmmc_mem.c/1.18/Tue Oct 22 16:49:27 2013//
+/sdmmc_scsi.c/1.30/Sun Jul 17 22:46:48 2011//
+/sdmmc_scsi.h/1.3/Tue Jul 18 04:10:35 2006//
+/sdmmcchip.h/1.5/Thu Sep 12 11:54:04 2013//
+/sdmmcdevs/1.8/Fri May 11 17:16:16 2007//
+/sdmmcdevs.h/1.8/Fri May 11 17:16:35 2007//
+/sdmmcreg.h/1.5/Thu Sep 12 11:54:04 2013//
+/sdmmcvar.h/1.22/Thu Sep 12 11:54:04 2013//
+D

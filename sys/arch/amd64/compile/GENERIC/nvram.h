@@ -1,0 +1,1 @@
+#define	NNVRAM	1

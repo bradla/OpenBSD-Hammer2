@@ -1,0 +1,1 @@
+#define	NAGP	1
