@@ -1,0 +1,1 @@
+#define	NVND	1

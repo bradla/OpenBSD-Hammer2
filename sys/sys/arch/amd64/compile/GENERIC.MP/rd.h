@@ -1,0 +1,1 @@
+#define	NRD	0

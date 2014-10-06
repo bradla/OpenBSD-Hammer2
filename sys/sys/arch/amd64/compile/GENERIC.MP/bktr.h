@@ -1,0 +1,1 @@
+#define	NBKTR	1

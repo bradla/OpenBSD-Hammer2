@@ -1,0 +1,1 @@
+#define	NXHCI	0

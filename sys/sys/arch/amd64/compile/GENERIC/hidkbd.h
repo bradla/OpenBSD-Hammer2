@@ -1,0 +1,1 @@
+#define	NHIDKBD	1

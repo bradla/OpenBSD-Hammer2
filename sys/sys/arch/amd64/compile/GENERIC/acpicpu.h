@@ -1,0 +1,1 @@
+#define	NACPICPU	1

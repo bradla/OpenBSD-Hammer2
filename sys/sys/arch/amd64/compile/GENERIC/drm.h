@@ -1,0 +1,1 @@
+#define	NDRM	1

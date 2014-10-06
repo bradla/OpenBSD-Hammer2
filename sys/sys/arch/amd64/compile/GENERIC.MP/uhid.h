@@ -1,0 +1,1 @@
+#define	NUHID	1

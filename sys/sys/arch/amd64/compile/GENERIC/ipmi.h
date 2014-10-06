@@ -1,0 +1,1 @@
+#define	NIPMI	1

@@ -1,0 +1,1 @@
+#define	NMSTS	1
