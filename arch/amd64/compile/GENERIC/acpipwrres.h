@@ -1,1 +1,0 @@
-#define	NACPIPWRRES	1

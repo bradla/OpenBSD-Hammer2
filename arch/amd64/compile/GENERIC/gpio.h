@@ -1,1 +1,0 @@
-#define	NGPIO	0

@@ -1,1 +1,0 @@
-#define	NINTAGP	1

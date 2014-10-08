@@ -1,1 +1,0 @@
-#define	NVETHER	1

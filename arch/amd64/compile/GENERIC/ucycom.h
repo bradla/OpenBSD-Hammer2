@@ -1,1 +1,0 @@
-#define	NUCYCOM	1

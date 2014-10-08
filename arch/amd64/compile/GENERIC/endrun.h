@@ -1,1 +1,0 @@
-#define	NENDRUN	1

@@ -1,1 +1,0 @@
-#define	NUK	1

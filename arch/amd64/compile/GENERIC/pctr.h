@@ -1,1 +1,0 @@
-#define	NPCTR	1

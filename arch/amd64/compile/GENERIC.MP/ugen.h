@@ -1,1 +1,0 @@
-#define	NUGEN	1

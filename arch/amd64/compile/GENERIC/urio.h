@@ -1,1 +1,0 @@
-#define	NURIO	1

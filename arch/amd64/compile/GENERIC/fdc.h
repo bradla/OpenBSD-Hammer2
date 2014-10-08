@@ -1,1 +1,0 @@
-#define	NFDC	1

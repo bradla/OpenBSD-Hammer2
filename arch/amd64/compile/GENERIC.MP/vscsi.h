@@ -1,1 +1,0 @@
-#define	NVSCSI	1

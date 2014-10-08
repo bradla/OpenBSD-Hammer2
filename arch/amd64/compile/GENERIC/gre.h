@@ -1,1 +1,0 @@
-#define	NGRE	1

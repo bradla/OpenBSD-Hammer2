@@ -1,1 +1,0 @@
-#define	NMPATH	1

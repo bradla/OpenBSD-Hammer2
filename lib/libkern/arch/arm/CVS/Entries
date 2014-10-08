@@ -1,9 +1,0 @@
-/bcopy.S/1.4/Sat Jun 15 19:16:53 2013//
-/bzero.S/1.3/Thu Jun 26 05:42:20 2008//
-/divsi3.S/1.2/Sun Feb  1 05:47:10 2004//
-/htonl.S/1.2/Thu Jun 26 05:42:20 2008//
-/htons.S/1.2/Thu Jun 26 05:42:20 2008//
-/memcpy.S/1.4/Sat Jun 15 19:16:53 2013//
-/memmove.S/1.2/Sun Feb  1 05:47:10 2004//
-/memset.S/1.2/Sun Feb  1 05:47:10 2004//
-D

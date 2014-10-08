@@ -1,1 +1,0 @@
-#define	NIOAPIC	1

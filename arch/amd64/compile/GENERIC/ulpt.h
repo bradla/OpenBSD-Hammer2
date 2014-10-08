@@ -1,1 +1,0 @@
-#define	NULPT	1
