@@ -1,4 +1,4 @@
-/*	$OpenBSD: exec_subr.c,v 1.32 2014/03/28 17:57:11 mpi Exp $	*/
+/*	$OpenBSD: exec_subr.c,v 1.37 2014/07/13 15:29:04 tedu Exp $	*/
 /*	$NetBSD: exec_subr.c,v 1.9 1994/12/04 03:10:42 mycroft Exp $	*/
 
 /*
@@ -41,7 +41,6 @@
 #include <sys/mman.h>
 #include <sys/resourcevar.h>
 
-#include <uvm/uvm_extern.h>
 #include <dev/rndvar.h>
 
 #ifdef DEBUG
@@ -92,11 +91,11 @@ vmcmdset_extend(struct exec_vmcmd_set *evsp)
 	evsp->evs_cnt += ocnt;
 
 	/* reallocate the command set */
-	nvcp = malloc(evsp->evs_cnt * sizeof(struct exec_vmcmd), M_EXEC,
+	nvcp = mallocarray(evsp->evs_cnt, sizeof(struct exec_vmcmd), M_EXEC,
 	    M_WAITOK);
 	bcopy(evsp->evs_cmds, nvcp, (ocnt * sizeof(struct exec_vmcmd)));
 	if (evsp->evs_cmds != evsp->evs_start)
-		free(evsp->evs_cmds, M_EXEC);
+		free(evsp->evs_cmds, M_EXEC, 0);
 	evsp->evs_cmds = nvcp;
 }
 
@@ -117,7 +116,7 @@ kill_vmcmds(struct exec_vmcmd_set *evsp)
 	 */
 	evsp->evs_used = 0;
 	if (evsp->evs_cmds != evsp->evs_start)
-		free(evsp->evs_cmds, M_EXEC);
+		free(evsp->evs_cmds, M_EXEC, 0);
 	evsp->evs_cmds = evsp->evs_start;
 	evsp->evs_cnt = EXEC_DEFAULT_VMCMD_SETSIZE;
 }
@@ -187,7 +186,7 @@ vmcmd_map_pagedvn(struct proc *p, struct exec_vmcmd *cmd)
 	 * first, attach to the object
 	 */
 
-	uobj = uvn_attach((void *)cmd->ev_vp, VM_PROT_READ|VM_PROT_EXECUTE);
+	uobj = uvn_attach(cmd->ev_vp, VM_PROT_READ|VM_PROT_EXECUTE);
 	if (uobj == NULL)
 		return (ENOMEM);
 
@@ -248,9 +247,9 @@ vmcmd_map_readvn(struct proc *p, struct exec_vmcmd *cmd)
 	if (error)
 		return (error);
 
-	if (cmd->ev_prot != (VM_PROT_READ|VM_PROT_WRITE|VM_PROT_EXECUTE)) {
+	if ((prot & VM_PROT_WRITE) == 0) {
 		/*
-		 * we had to map in the area at PROT_ALL so that vn_rdwr()
+		 * we had to map in the area at PROT_WRITE so that vn_rdwr()
 		 * could write to it.   however, the caller seems to want
 		 * it mapped read-only, so now we are going to have to call
 		 * uvm_map_protect() to fix up the protection.  ICK.
@@ -308,7 +307,7 @@ vmcmd_randomize(struct proc *p, struct exec_vmcmd *cmd)
 	buf = malloc(cmd->ev_len, M_TEMP, M_WAITOK);
 	arc4random_buf(buf, cmd->ev_len);
 	error = copyout(buf, (void *)cmd->ev_addr, cmd->ev_len);
-	free(buf, M_TEMP);
+	free(buf, M_TEMP, 0);
 
 	return (error);
 }

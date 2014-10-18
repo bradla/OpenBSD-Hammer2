@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_exec.c,v 1.141 2014/04/18 11:51:17 guenther Exp $	*/
+/*	$OpenBSD: kern_exec.c,v 1.146 2014/09/28 18:52:04 kettenis Exp $	*/
 /*	$NetBSD: kern_exec.c,v 1.75 1996/02/09 18:59:28 christos Exp $	*/
 
 /*-
@@ -59,8 +59,6 @@
 
 #include <sys/syscallargs.h>
 
-#include <uvm/uvm_extern.h>
-
 #include <machine/reg.h>
 
 #ifdef __HAVE_MD_TCB
@@ -75,10 +73,15 @@
 #include <dev/systrace.h>
 #endif
 
+const struct kmem_va_mode kv_exec = {
+	.kv_wait = 1,
+	.kv_map = &exec_map
+};
+
 /*
  * Map the shared signal code.
  */
-int exec_sigcode_map(struct proc *, struct emul *);
+int exec_sigcode_map(struct process *, struct emul *);
 
 /*
  * If non-zero, stackgap_random specifies the upper limit of the random gap size
@@ -256,7 +259,7 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 #endif
 	char *stack;
 	struct ps_strings arginfo;
-	struct vmspace *vm = p->p_vmspace;
+	struct vmspace *vm = pr->ps_vmspace;
 	char **tmpfap;
 	extern struct emul emul_native;
 #if NSYSTRACE > 0
@@ -319,7 +322,7 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	/* XXX -- THE FOLLOWING SECTION NEEDS MAJOR CLEANUP */
 
 	/* allocate an argument buffer */
-	argp = (char *) uvm_km_valloc_wait(exec_map, NCARGS);
+	argp = km_alloc(NCARGS, &kv_exec, &kp_pageable, &kd_waitok);
 #ifdef DIAGNOSTIC
 	if (argp == NULL)
 		panic("execve: argp == NULL");
@@ -338,10 +341,10 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 				*dp++ = *cp++;
 			*dp++ = '\0';
 
-			free(*tmpfap, M_EXEC);
+			free(*tmpfap, M_EXEC, 0);
 			tmpfap++; argc++;
 		}
-		free(pack.ep_fa, M_EXEC);
+		free(pack.ep_fa, M_EXEC, 0);
 		pack.ep_flags &= ~EXEC_HASARGL;
 	}
 
@@ -415,17 +418,16 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	/*
 	 * we're committed: any further errors will kill the process, so
 	 * kill the other threads now.
-	 * XXX wait until threads are reaped to make uvmspace_exec() cheaper?
 	 */
 	single_thread_set(p, SINGLE_EXIT, 0);
 
 	/*
 	 * Prepare vmspace for remapping. Note that uvmspace_exec can replace
-	 * p_vmspace!
+	 * pr_vmspace!
 	 */
 	uvmspace_exec(p, VM_MIN_ADDRESS, VM_MAXUSER_ADDRESS);
 
-	vm = p->p_vmspace;
+	vm = pr->ps_vmspace;
 	/* Now map address space */
 	vm->vm_taddr = (char *)pack.ep_taddr;
 	vm->vm_tsize = atop(round_page(pack.ep_tsize));
@@ -476,7 +478,7 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	bcopy(nid.ni_cnd.cn_nameptr, p->p_comm, len);
 	pr->ps_acflag &= ~AFORK;
 
-	/* record proc's vnode, for use by procfs and others */
+	/* record proc's vnode, for use by sysctl */
 	otvp = pr->ps_textvp;
 	vref(pack.ep_vp);
 	pr->ps_textvp = pack.ep_vp;
@@ -540,17 +542,6 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 			 * shared because we're suid.
 			 */
 			fp = fd_getfile(p->p_fd, i);
-#ifdef PROCFS
-			/*
-			 * Close descriptors that are writing to procfs.
-			 */
-			if (fp && fp->f_type == DTYPE_VNODE &&
-			    ((struct vnode *)(fp->f_data))->v_tag == VT_PROCFS &&
-			    (fp->f_flag & FWRITE)) {
-				fdrelease(p, i);
-				fp = NULL;
-			}
-#endif
 
 			/*
 			 * Ensure that stdin, stdout, and stderr are already
@@ -631,7 +622,7 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	timespecclear(&p->p_tu.tu_runtime);
 	p->p_tu.tu_uticks = p->p_tu.tu_sticks = p->p_tu.tu_iticks = 0;
 
-	uvm_km_free_wakeup(exec_map, (vaddr_t) argp, NCARGS);
+	km_free(argp, NCARGS, &kv_exec, &kp_pageable);
 
 	pool_put(&namei_pool, nid.ni_cnd.cn_pnbuf);
 	vn_close(pack.ep_vp, FREAD, cred, p);
@@ -653,7 +644,7 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 #endif
 
 	/* map the process's signal trampoline code */
-	if (exec_sigcode_map(p, pack.ep_emul))
+	if (exec_sigcode_map(pr, pack.ep_emul))
 		goto free_pack_abort;
 
 #ifdef __HAVE_EXEC_MD_MAP
@@ -665,7 +656,7 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	if (pr->ps_flags & PS_TRACED)
 		psignal(p, SIGTRAP);
 
-	free(pack.ep_hdr, M_EXEC);
+	free(pack.ep_hdr, M_EXEC, 0);
 
 	/*
 	 * Call emulation specific exec hook. This can setup per-process
@@ -727,14 +718,14 @@ bad:
 	if (pack.ep_interp != NULL)
 		pool_put(&namei_pool, pack.ep_interp);
 	if (pack.ep_emul_arg != NULL)
-		free(pack.ep_emul_arg, M_TEMP);
+		free(pack.ep_emul_arg, M_TEMP, 0);
 	/* close and put the exec'd file */
 	vn_close(pack.ep_vp, FREAD, cred, p);
 	pool_put(&namei_pool, nid.ni_cnd.cn_pnbuf);
-	uvm_km_free_wakeup(exec_map, (vaddr_t) argp, NCARGS);
+	km_free(argp, NCARGS, &kv_exec, &kp_pageable);
 
  freehdr:
-	free(pack.ep_hdr, M_EXEC);
+	free(pack.ep_hdr, M_EXEC, 0);
 #if NSYSTRACE > 0
  clrflag:
 #endif
@@ -757,13 +748,13 @@ exec_abort:
 	if (pack.ep_interp != NULL)
 		pool_put(&namei_pool, pack.ep_interp);
 	if (pack.ep_emul_arg != NULL)
-		free(pack.ep_emul_arg, M_TEMP);
+		free(pack.ep_emul_arg, M_TEMP, 0);
 	pool_put(&namei_pool, nid.ni_cnd.cn_pnbuf);
 	vn_close(pack.ep_vp, FREAD, cred, p);
-	uvm_km_free_wakeup(exec_map, (vaddr_t) argp, NCARGS);
+	km_free(argp, NCARGS, &kv_exec, &kp_pageable);
 
 free_pack_abort:
-	free(pack.ep_hdr, M_EXEC);
+	free(pack.ep_hdr, M_EXEC, 0);
 	exit1(p, W_EXITCODE(0, SIGABRT), EXIT_NORMAL);
 
 	/* NOTREACHED */
@@ -817,7 +808,7 @@ copyargs(struct exec_package *pack, struct ps_strings *arginfo, void *stack,
 }
 
 int
-exec_sigcode_map(struct proc *p, struct emul *e)
+exec_sigcode_map(struct process *pr, struct emul *e)
 {
 	vsize_t sz;
 
@@ -851,9 +842,9 @@ exec_sigcode_map(struct proc *p, struct emul *e)
 		uvm_unmap(kernel_map, va, va + round_page(sz));
 	}
 
-	p->p_p->ps_sigcode = 0; /* no hint */
+	pr->ps_sigcode = 0; /* no hint */
 	uao_reference(e->e_sigobject);
-	if (uvm_map(&p->p_vmspace->vm_map, &p->p_p->ps_sigcode, round_page(sz),
+	if (uvm_map(&pr->ps_vmspace->vm_map, &pr->ps_sigcode, round_page(sz),
 	    e->e_sigobject, 0, 0, UVM_MAPFLAG(UVM_PROT_RX, UVM_PROT_RX,
 	    UVM_INH_SHARE, UVM_ADV_RANDOM, 0))) {
 		uao_detach(e->e_sigobject);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: subr_prf.c,v 1.81 2013/12/12 21:00:09 guenther Exp $	*/
+/*	$OpenBSD: subr_prf.c,v 1.83 2014/07/13 23:49:40 uebayasi Exp $	*/
 /*	$NetBSD: subr_prf.c,v 1.45 1997/10/24 18:14:25 chuck Exp $	*/
 
 /*-
@@ -156,8 +156,7 @@ void
 __assert(const char *t, const char *f, int l, const char *e)
 {
 
-	panic("kernel %sassertion \"%s\" failed: file \"%s\", line %d",
-		t, e, f, l);
+	panic(__KASSERTSTR, t, e, f, l);
 }
 
 /*
@@ -217,7 +216,8 @@ panic(const char *fmt, ...)
 	else
 		db_stack_dump();
 #endif
-	boot(bootopt);
+	reboot(bootopt);
+	/* NOTREACHED */
 }
 
 /*

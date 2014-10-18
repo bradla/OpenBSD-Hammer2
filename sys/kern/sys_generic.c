@@ -1,4 +1,4 @@
-/*	$OpenBSD: sys_generic.c,v 1.86 2014/03/30 21:54:48 guenther Exp $	*/
+/*	$OpenBSD: sys_generic.c,v 1.92 2014/07/13 15:48:41 tedu Exp $	*/
 /*	$NetBSD: sys_generic.c,v 1.24 1996/03/29 00:25:32 cgd Exp $	*/
 
 /*
@@ -212,13 +212,13 @@ dofilereadv(struct proc *p, int fd, struct file *fp, const struct iovec *iovp,
 	if (ktriov != NULL) {
 		if (error == 0)
 			ktrgenio(p, fd, UIO_READ, ktriov, cnt);
-		free(ktriov, M_TEMP);
+		free(ktriov, M_TEMP, 0);
 	}
 #endif
 	*retval = cnt;
  done:
 	if (needfree)
-		free(needfree, M_IOV);
+		free(needfree, M_IOV, 0);
  out:
 	FRELE(fp, p);
 	return (error);
@@ -368,13 +368,13 @@ dofilewritev(struct proc *p, int fd, struct file *fp, const struct iovec *iovp,
 	if (ktriov != NULL) {
 		if (error == 0)
 			ktrgenio(p, fd, UIO_WRITE, ktriov, cnt);
-		free(ktriov, M_TEMP);
+		free(ktriov, M_TEMP, 0);
 	}
 #endif
 	*retval = cnt;
  done:
 	if (needfree)
-		free(needfree, M_IOV);
+		free(needfree, M_IOV, 0);
  out:
 	FRELE(fp, p);
 	return (error);
@@ -518,7 +518,7 @@ sys_ioctl(struct proc *p, void *v, register_t *retval)
 out:
 	FRELE(fp, p);
 	if (memp)
-		free(memp, M_IOCTLOPS);
+		free(memp, M_IOCTLOPS, 0);
 	return (error);
 }
 
@@ -616,7 +616,7 @@ dopselect(struct proc *p, int nd, fd_set *in, fd_set *ou, fd_set *ex,
 	if (ni > sizeof(bits[0])) {
 		caddr_t mbits;
 
-		mbits = malloc(ni * 6, M_TEMP, M_WAITOK|M_ZERO);
+		mbits = mallocarray(6, ni, M_TEMP, M_WAITOK|M_ZERO);
 		pibits[0] = (fd_set *)&mbits[ni * 0];
 		pibits[1] = (fd_set *)&mbits[ni * 1];
 		pibits[2] = (fd_set *)&mbits[ni * 2];
@@ -657,11 +657,8 @@ dopselect(struct proc *p, int nd, fd_set *in, fd_set *ou, fd_set *ex,
 	}
 	timo = 0;
 
-	if (sigmask) {
-		p->p_oldmask = p->p_sigmask;
-		atomic_setbits_int(&p->p_flag, P_SIGSUSPEND);
-		p->p_sigmask = *sigmask &~ sigcantmask;
-	}
+	if (sigmask)
+		dosigsuspend(p, *sigmask &~ sigcantmask);
 
 retry:
 	ncoll = nselcoll;
@@ -714,7 +711,7 @@ done:
 	}
 
 	if (pibits[0] != (fd_set *)&bits[0])
-		free(pibits[0], M_TEMP);
+		free(pibits[0], M_TEMP, 0);
 	return (error);
 }
 
@@ -948,7 +945,7 @@ doppoll(struct proc *p, struct pollfd *fds, u_int nfds,
 
 	/* optimize for the default case, of a small nfds value */
 	if (sz > sizeof(pfds))
-		pl = (struct pollfd *) malloc(sz, M_TEMP, M_WAITOK);
+		pl = malloc(sz, M_TEMP, M_WAITOK);
 
 	if ((error = copyin(fds, pl, sz)) != 0)
 		goto bad;
@@ -965,11 +962,8 @@ doppoll(struct proc *p, struct pollfd *fds, u_int nfds,
 	}
 	timo = 0;
 
-	if (sigmask) {
-		p->p_oldmask = p->p_sigmask;
-		atomic_setbits_int(&p->p_flag, P_SIGSUSPEND);
-		p->p_sigmask = *sigmask &~ sigcantmask;
-	}
+	if (sigmask)
+		dosigsuspend(p, *sigmask &~ sigcantmask);
 
 retry:
 	ncoll = nselcoll;
@@ -1015,7 +1009,7 @@ done:
 	}
 bad:
 	if (pl != pfds)
-		free(pl, M_TEMP);
+		free(pl, M_TEMP, 0);
 	return (error);
 }
 

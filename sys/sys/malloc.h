@@ -1,4 +1,4 @@
-/*	$OpenBSD: malloc.h,v 1.107 2013/06/03 15:56:01 tedu Exp $	*/
+/*	$OpenBSD: malloc.h,v 1.111 2014/07/12 18:43:32 tedu Exp $	*/
 /*	$NetBSD: malloc.h,v 1.39 1998/07/12 19:52:01 augustss Exp $	*/
 
 /*
@@ -168,7 +168,7 @@
 
 #define	M_KEVENT	137	/* kqueue related */
 
-#define	M_BLUETOOTH	138	/* Bluetooth */
+	/*		138	   free */
 
 #define M_BWMETER	139	/* Multicast upcall bw meters */
 
@@ -176,15 +176,13 @@
 #define M_UDFFENTRY	141	/* UDF file entry */
 #define M_UDFFID	142	/* UDF file id */
 
-#define	M_BTHIDEV	143	/* Bluetooth HID */
+	/*		143	   free */
 
 #define M_AGP		144	/* AGP Memory */
 
 #define M_DRM		145	/* Direct Rendering Manager */
 
-#define C_ZLIB_BUFFER_DEFLATE	146	/* Hammer 2 */
-
-#define	M_LAST		147	/* Must be last type + 1 */
+#define	M_LAST		146	/* Must be last type + 1 */
 
 #define	INITKMEMNAMES { \
 	"free",		/* 0 M_FREE */ \
@@ -309,12 +307,12 @@
 	"NTFS decomp",	/* 135 M_NTFSDECOMP */ \
 	"NTFS vrun",	/* 136 M_NTFSRUN */ \
 	"kqueue",	/* 137 M_KEVENT */ \
-	"bluetooth",	/* 138 M_BLUETOOTH */ \
+	NULL,	/* 138 free */ \
 	"bwmeter",	/* 139 M_BWMETER */ \
 	"UDF mount",	/* 140 M_UDFMOUNT */ \
 	"UDF file entry",	/* 141 M_UDFFENTRY */ \
 	"UDF file id",	/* 142 M_UDFFID */ \
-	"Bluetooth HID",	/* 143 M_BTHIDEV */ \
+	NULL,	/* 143 free */ \
 	"AGP Memory",	/* 144 M_AGP */ \
 	"DRM",	/* 145 M_DRM */ \
 }
@@ -393,17 +391,18 @@ extern struct kmemusage *kmemusage;
 extern char *kmembase;
 extern struct kmembuckets bucket[];
 
-extern void *malloc(unsigned long size, int type, int flags);
-extern void free(void *addr, int type);
-extern int sysctl_malloc(int *, u_int, void *, size_t *, void *, size_t,
-			      struct proc *);
+void	*malloc(size_t, int, int);
+void	*mallocarray(size_t, size_t, int, int);
+void	free(void *, int, size_t);
+int	sysctl_malloc(int *, u_int, void *, size_t *, void *, size_t,
+	    struct proc *);
 
 size_t malloc_roundup(size_t);
 void	malloc_printit(int (*)(const char *, ...));
 
 void	poison_mem(void *, size_t);
-int	poison_check(void *, size_t, size_t *, int *);
-int32_t poison_value(void *);
+int	poison_check(void *, size_t, size_t *, uint32_t *);
+uint32_t poison_value(void *);
 
 #ifdef MALLOC_DEBUG
 int	debug_malloc(unsigned long, int, int, void **);

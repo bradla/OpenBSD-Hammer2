@@ -40,57 +40,23 @@
  * implementation.  See hammer2_disk.h for on-disk structures.
  *
  * There is an in-memory representation of all on-media data structure.
- * Basically everything is represented by a hammer2_chain structure
- * in-memory and other higher-level structures map to chains.
+ * Almost everything is represented by a hammer2_chain structure in-memory.
+ * Other higher-level structures typically map to chains.
  *
  * A great deal of data is accessed simply via its buffer cache buffer,
- * which is mapped for the duration of the chain's lock.  However, because
- * chains may represent blocks smaller than the 16KB minimum we impose
- * on buffer cache buffers, we cannot hold related buffer cache buffers
- * locked for smaller blocks.  In these situations we kmalloc() a copy
- * of the block.
+ * which is mapped for the duration of the chain's lock.  Hammer2 must
+ * implement its own buffer cache layer on top of the system layer to
+ * allow for different threads to lock different sub-block-sized buffers.
  *
  * When modifications are made to a chain a new filesystem block must be
- * allocated.  Multiple modifications do not necessarily allocate new
- * blocks.  However, when a flush occurs a flush synchronization point
- * is created and any new modifications made after this point will allocate
- * a new block even if the chain is already in a modified state.
+ * allocated.  Multiple modifications do not typically allocate new blocks
+ * until the current block has been flushed.  Flushes do not block the
+ * front-end unless the front-end operation crosses the current inode being
+ * flushed.
  *
  * The in-memory representation may remain cached (for example in order to
  * placemark clustering locks) even after the related data has been
  * detached.
- *
- *				CORE SHARING
- *
- * In order to support concurrent flushes a flush synchronization point
- * is created represented by a transaction id.  Among other things,
- * operations may move filesystem objects from one part of the topology
- * to another (for example, if you rename a file or when indirect blocks
- * are created or destroyed, and a few other things).  When this occurs
- * across a flush synchronization point the flusher needs to be able to
- * recurse down BOTH the 'before' version of the topology and the 'after'
- * version.
- *
- * To facilitate this modifications to chains do what is called a
- * DELETE-DUPLICATE operation.  Chains are not actually moved in-memory.
- * Instead the chain we wish to move is deleted and a new chain is created
- * at the target location in the topology.  ANY SUBCHAINS PLACED UNDER THE
- * CHAIN BEING MOVED HAVE TO EXIST IN BOTH PLACES.  To make this work
- * all sub-chains are managed by the hammer2_chain_core structure.  This
- * structure can be multi-homed, meaning that it can have more than one
- * chain as its parent.  When a chain is delete-duplicated the chain's core
- * becomes shared under both the old and new chain.
- *
- *				STALE CHAINS
- *
- * When a chain is delete-duplicated the old chain typically becomes stale.
- * This is detected via the HAMMER2_CHAIN_DUPLICATED flag in chain->flags.
- * To avoid executing live filesystem operations on stale chains, the inode
- * locking code will follow stale chains via core->ownerq until it finds
- * the live chain.  The lock prevents ripups by other threads.  Lookups
- * must properly order locking operations to prevent other threads from
- * racing the lookup operation and will also follow stale chains when
- * required.
  */
 
 #ifndef _VFS_HAMMER2_HAMMER2_H_
@@ -111,20 +77,49 @@
 #include <sys/lockf.h>
 #include <machine/spinlock.h>
 #include <sys/atomic.h>
-#include <sys/namecache.h>
+#include <sys/mplock.h>
+
+#include <sys/systm.h>
+#include <sys/kernel.h>
+#include <sys/syslog.h>
+#include <sys/device.h>
+#include <sys/errno.h>
+
+#include <machine/atomic.h>
+#include <machine/i8259.h>
+#include <machine/cpu.h>
+#include <machine/pio.h>
+#include <machine/cpufunc.h>
+#include <machine/intr.h>
+//#include <sys/namecache.h>
 #include <sys/objcache.h>
 #include <dev/pci/drm/drm_atomic.h>
+
+#include <sys/dmsg.h>
 
 #include "hammer2_disk.h"
 #include "hammer2_mount.h"
 #include "hammer2_ioctl.h"
-//#include "hammer2_ccms.h"
+#include "hammer2_ccms.h"
 
-/* XXX temporary porting goop */
-/* #define KKASSERT(cond) if (!(cond)) panic("KKASSERT: %s in %s", #cond, __func__)
-#undef KASSERT
-#define KASSERT(cond, complaint) if (!(cond)) panic complaint
-*/
+struct hammer2_chain;
+struct hammer2_cluster;
+struct hammer2_inode;
+struct hammer2_mount;
+struct hammer2_pfsmount;
+struct hammer2_span;
+struct hammer2_state;
+struct hammer2_msg;
+
+/*
+ * The xid tracks internal transactional updates.
+ *
+ * XXX fix-me, really needs to be 64-bits
+ */
+typedef uint32_t hammer2_xid_t;
+
+#define HAMMER2_XID_MIN	0x00000000U
+#define HAMMER2_XID_MAX 0x7FFFFFFFU
 
 #define M_HAMMER2 1001
 #define atomic_set_int(p, bits)         atomic_setbits_int(p,bits)
@@ -158,78 +153,75 @@
 #define   B_RELBUF        0x00400000      /* Release VMIO buffer. */
 #define   B_CLUSTEROK     0x00020000      /* Pagein op, so swap() can count it. */
 #define        M_INTWAIT       (M_WAITOK | M_USE_RESERVE | M_USE_INTERRUPT_RESERVE)
-#define RB_GENERATE2(name, type, field, cmp, datatype, indexfield)
+//#define RB_GENERATE2(name, type, field, cmp, datatype, indexfield)
 
-//#define RB_LOOKUP(name, root, value)     name##_RB_LOOKUP(root, value)
+#define RB_LOOKUP(name, root, value)     name##_RB_LOOKUP(root, value)
 //#define hammer2_io_tree_RB_LOOKUP(name, root, value, value2)     name##_RB_LOOKUP(root, value, value2)
 #define RB_SCAN(name, root, cmp, callback, data)  
 #define RB_EMPTY(head)                  (RB_ROOT(head) == NULL)
+#define RB_PROTOTYPE2(name, type, field, cmp, datatype) RB_PROTOTYPE(name, type, field, cmp); \
+struct type *name##_RB_LOOKUP(struct name *, datatype) \
 
-/* int vfsync(struct vnode *vp, int waitfor, int passes,
-        int (*checkdef)(struct buf *),
-        int (*waitoutput)(struct vnode *, struct thread *));
+/*
+ * Macros that define a red-black tree
+ */
+
+#define RB_SCAN_INFO(name, type)					\
+struct name##_scan_info {						\
+	struct name##_scan_info *link;					\
+	struct type	*node;						\
+}
+
+#define _RB_PROTOTYPE(name, type, field, cmp, STORQUAL)			\
+STORQUAL void name##_RB_INSERT_COLOR(struct name *, struct type *);	\
+STORQUAL void name##_RB_REMOVE_COLOR(struct name *, struct type *, struct type *);\
+STORQUAL struct type *name##_RB_REMOVE(struct name *, struct type *);	\
+STORQUAL struct type *name##_RB_INSERT(struct name *, struct type *);	\
+STORQUAL struct type *name##_RB_FIND(struct name *, struct type *);	\
+STORQUAL int name##_RB_SCAN(struct name *, int (*)(struct type *, void *),\
+			int (*)(struct type *, void *), void *);	\
+STORQUAL struct type *name##_RB_NEXT(struct type *);			\
+STORQUAL struct type *name##_RB_PREV(struct type *);			\
+STORQUAL struct type *name##_RB_MINMAX(struct name *, int);		\
+RB_SCAN_INFO(name, type)						\
+
+/*
+ * This extended version implements a fast LOOKUP function given
+ * a numeric data type.
+ *
+ * The element whos index/offset field is exactly the specified value
+ * will be returned, or NULL.
+ */
+#define RB_GENERATE2(name, type, field, cmp, datatype, indexfield)	\
+RB_GENERATE(name, type, field, cmp)					\
+									\
+struct type *								\
+name##_RB_LOOKUP(struct name *head, datatype value)			\
+{									\
+	struct type *tmp;						\
+									\
+	tmp = RB_ROOT(head);						\
+	while (tmp) {							\
+		if (value > tmp->indexfield) 				\
+			tmp = RB_RIGHT(tmp, field);			\
+		else if (value < tmp->indexfield) 			\
+			tmp = RB_LEFT(tmp, field);			\
+		else 							\
+			return(tmp);					\
+	}								\
+	return(NULL);							\
+}									\
+
+/* #define RB_SCAN(name, root, cmp, callback, data) 			\
+				name##_RB_SCAN(root, cmp, callback, data)
 */
 
 
-struct globaldata {
-	struct privatespace *gd_prvspace;       /* self-reference */
-	struct thread   *gd_curthread;
-  	struct thread   *gd_freetd;             /* cache one free td */
-	__uint32_t      gd_reqflags;            /* (see note above) */
-	long            gd_flags;
-	//lwkt_queue      gd_tdallq;              /* all threads */
-	//lwkt_queue      gd_tdrunq;              /* runnable threads */
-	__uint32_t      gd_cpuid;
-	//cpumask_t       gd_cpumask;             /* mask = CPUMASK(cpuid) */
-	//cpumask_t       gd_other_cpus;          /* mask of 'other' cpus */
-	struct timeval  gd_stattv;
-	int             gd_intr_nesting_level;  /* hard code, intrs, ipis */
-	//struct vmmeter  gd_cnt;
-	struct vmtotal  gd_vmtotal;
-	//cpumask_t       gd_ipimask;             /* pending ipis from cpus */
-	//struct lwkt_ipiq *gd_ipiq;              /* array[ncpu] of ipiq's */
-	//struct lwkt_ipiq gd_cpusyncq;           /* ipiq for cpu synchro */
-	u_int           gd_npoll;               /* ipiq synchronization */
-	int             gd_tdrunqcount;
-	//struct thread   gd_unused02B;
-	//struct thread   gd_idlethread;
-	//SLGlobalData    gd_slab;                /* slab allocator */
-	int             gd_trap_nesting_level;  /* track traps */
-	int             gd_vme_avail;           /* vm_map_entry reservation */
-	struct vm_map_entry *gd_vme_base;       /* vm_map_entry reservation */
-	//struct systimerq gd_systimerq;          /* per-cpu system timers */
-	int             gd_syst_nest;
-	//struct systimer gd_hardclock;           /* scheduler periodic */
-	//struct systimer gd_statclock;           /* statistics periodic */
-	//struct systimer gd_schedclock;          /* scheduler periodic */
-	volatile __uint32_t gd_time_seconds;    /* uptime in seconds */
-	//volatile sysclock_t gd_cpuclock_base;   /* cpuclock relative base */
- 
-	struct pipe     *gd_pipeq;              /* cache pipe structures */
-	struct nchstats *gd_nchstats;           /* namecache effectiveness */
-	int             gd_pipeqcount;          /* number of structures */
-	//sysid_t         gd_sysid_alloc;         /* allocate unique sysid */
-
-	struct tslpque  *gd_tsleep_hash;        /* tsleep/wakeup support */
-	long            gd_processing_ipiq;
-	int             gd_spinlocks;           /* Exclusive spinlocks held */
-	struct systimer *gd_systimer_inprog;    /* in-progress systimer */
-	int             gd_timer_running;
-	u_int           gd_idle_repeat;         /* repeated switches to idle */
-	int             gd_ireserved[7];
-	const char      *gd_infomsg;            /* debugging */
-	//struct lwkt_tokref gd_handoff;          /* hand-off tokref */
-	void            *gd_delayed_wakeup[2];
-	void            *gd_sample_pc;          /* sample program ctr/tr */
-	void            *gd_preserved[5];       /* future fields */
-	/* extended by <machine/globaldata.h> */
-};
  
 typedef struct globaldata *globaldata_t;
 
 #define VOP_FSYNC(vp, waitfor, flags)                   \
-	vop_fsync(*(vp)->v_ops, vp, waitfor, flags)
-
+	vop_fsync(*(vp)->v_op, vp, waitfor, flags)
 /*
  * vnode must be locked
  */
@@ -261,33 +253,14 @@ struct objcache {
   	//struct percpu_objcache  cache_percpu[];         /* per-cpu caches */
 };
 
-//void vfs_bio_clrbuf(struct buf *);
+
 uint32_t iscsi_crc32(const void *, size_t);
 int vop_helper_chmod(struct vnode *, mode_t, struct ucred *, uid_t, gid_t, mode_t *);
 int vop_helper_setattr_flags(u_int32_t *, u_int32_t,uid_t, struct ucred *);
 int vop_helper_chown(struct vnode *vp, uid_t new_uid, gid_t new_gid,
                  struct ucred *cred,
                  uid_t *cur_uidp, gid_t *cur_gidp, mode_t *cur_modep);
-//int nvtruncbuf(struct vnode *vp, off_t length, int blksize, int boff, int trivial);
 void bheavy(struct buf *bp);
-//viod bioq_insert_tail(struct bio_queue_head *bioq, struct bio *bio);
-//void objcache_destroy(struct objcache *);
-
-/*
- * vfs_bio_clrbuf:
- *
- *      Clear a buffer.  This routine essentially fakes an I/O, so we need
- *      to clear B_ERROR and B_INVAL.
- *
- *      Note that while we only theoretically need to clear through b_bcount,
- *      we go ahead and clear through b_bufsize.
- */
-/*
-void
-vfs_bio_clrbuf(struct buf *bp)
-{
-}
-*/
 
 struct bio_queue_head {
 	TAILQ_HEAD(bio_queue, bio) queue;
@@ -323,6 +296,7 @@ struct vop_nremove_args {
  * Warning: a_dvp is only held, not ref'd.  The target must still vget()
  * it.
  */
+/*
 struct vop_nlink_args {
 	struct vop_generic_args a_head;
 	struct nchandle *a_nch;
@@ -330,6 +304,7 @@ struct vop_nlink_args {
 	struct vnode *a_vp;
 	struct ucred *a_cred;
 };
+*/
 
 struct vop_nlookupdotdot_args {
 	struct vop_generic_args a_head;
@@ -439,35 +414,6 @@ struct vop_nsymlink_args {
  * persistency and structural settings for every command simply by
  * switch()ing on the (cmd) field.
  */
-#define DMSGF_CREATE            0x80000000U     /* msg start */
-#define DMSGF_DELETE            0x40000000U     /* msg end */
-#define DMSGF_REPLY             0x20000000U     /* reply path */
-#define DMSGF_ABORT             0x10000000U     /* abort req */
-#define DMSGF_AUXOOB            0x08000000U     /* aux-data is OOB */
-#define DMSGF_FLAG2             0x04000000U
-#define DMSGF_FLAG1             0x02000000U
-#define DMSGF_FLAG0             0x01000000U
-
-#define DMSGF_FLAGS             0xFF000000U     /* all flags */
-#define DMSGF_PROTOS            0x00F00000U     /* all protos */
-#define DMSGF_CMDS              0x000FFF00U     /* all cmds */
-#define DMSGF_SIZE              0x000000FFU     /* N*32 */
-
-#define DMSG_PEER_NONE          0
-#define DMSG_PEER_CLUSTER       1       /* a cluster controller */
-#define DMSG_PEER_BLOCK         2       /* block devices */
-#define DMSG_PEER_HAMMER2       3       /* hammer2-mounted volumes */
-
-#define DMSGF_CMDSWMASK         (DMSGF_CMDS |   \
-                                         DMSGF_SIZE |   \
-                                         DMSGF_PROTOS | \
-                                         DMSGF_REPLY)
-#define DMSGF_TRANSMASK         (DMSGF_CMDS |   \
-                                         DMSGF_SIZE |   \
-                                         DMSGF_PROTOS | \
-                                         DMSGF_REPLY |  \
-                                         DMSGF_CREATE | \
-                                         DMSGF_DELETE)
 
 typedef enum buf_cmd {
         BUF_CMD_DONE = 0,
@@ -564,9 +510,6 @@ struct bufh2 {
 	struct	workhead b_dep;		/* List of filesystem dependencies. */
 };
 
-RB_HEAD(buf_rb_tree, buf);
-RB_HEAD(buf_rb_hash, buf);
-
 struct vnodeh2 {
         struct _atomic_lock *v_spin;
         int     v_flag;                         /* vnode flags (see below) */
@@ -583,7 +526,7 @@ struct vnodeh2 {
         LIST_ENTRY(vnode) v_synclist;           /* vnodes with dirty buffers */
         struct buf_rb_tree v_rbclean_tree;      /* RB tree of clean bufs */
         struct buf_rb_tree v_rbdirty_tree;      /* RB tree of dirty bufs */
-        struct buf_rb_hash v_rbhash_tree;       /* RB tree general lookup */
+        //struct buf_rb_hash v_rbhash_tree;       /* RB tree general lookup */
         enum    vtype v_type;                   /* vnode type */
         int16_t         v_act;                  /* use heuristic */
         int16_t         v_state;                /* active/free/cached */
@@ -665,9 +608,9 @@ struct nlookupdata {
          * a pure thread.  The result from nlookup() will be returned in
          * nl_nch.
          */
-        struct nchandle nl_nch;         /* start-point and result */
-        struct nchandle nl_rootnch;     /* root directory */
-        struct nchandle nl_jailnch;     /* jail directory */
+        struct nchandle *nl_nch;         /* start-point and result */
+        //struct nchandle nl_rootnch;     /* root directory */
+        //struct nchandle nl_jailnch;     /* jail directory */
 
         char            *nl_path;       /* path buffer */
         struct thread   *nl_td;         /* thread requesting the nlookup */
@@ -730,279 +673,147 @@ struct bioh2 {
         } bio_caller_info3;
 };
 
-struct dmsg_hdr {
-        uint16_t        magic;          /* 00 sanity, synchro, endian */
-        uint16_t        reserved02;     /* 02 */
-        uint32_t        salt;           /* 04 random salt helps w/crypto */
-
-        uint64_t        msgid;          /* 08 message transaction id */
-        uint64_t        circuit;        /* 10 circuit id or 0   */
-        uint64_t        reserved18;     /* 18 */
-
-        uint32_t        cmd;            /* 20 flags | cmd | hdr_size / ALIGN */
-        uint32_t        aux_crc;        /* 24 auxillary data crc */
-        uint32_t        aux_bytes;      /* 28 auxillary data length (bytes) */
-        uint32_t        error;          /* 2C error code or 0 */
-        uint64_t        aux_descr;      /* 30 negotiated OOB data descr */
-        uint32_t        reserved38;     /* 38 */
-        uint32_t        hdr_crc;        /* 3C (aligned) extended header crc */
-};
-
-typedef struct dmsg_hdr dmsg_hdr_t;
-
-#define DMSG_PROTO_LNK          0x00000000U
-#define DMSG_PROTO_DBG          0x00100000U
-#define DMSG_PROTO_DOM          0x00200000U
-#define DMSG_PROTO_CAC          0x00300000U
-#define DMSG_PROTO_QRM          0x00400000U
-#define DMSG_PROTO_BLK          0x00500000U
-#define DMSG_PROTO_VOP          0x00600000U
-
-/*
- * Message command constructors, sans flags
- */
-#define DMSG_ALIGN              64
-#define DMSG_ALIGNMASK          (DMSG_ALIGN - 1)
-#define DMSG_DOALIGN(bytes)     (((bytes) + DMSG_ALIGNMASK) &           \
-                                 ~DMSG_ALIGNMASK)
-
-#define DMSG_HDR_ENCODE(elm)    (((uint32_t)sizeof(struct elm) +        \
-                                  DMSG_ALIGNMASK) /                     \
-                                 DMSG_ALIGN)
-
-#define DMSG_LNK(cmd, elm)      (DMSG_PROTO_LNK |                       \
-                                         ((cmd) << 8) |                 \
-                                         DMSG_HDR_ENCODE(elm))
-
-#define DMSG_DBG(cmd, elm)      (DMSG_PROTO_DBG |                       \
-                                         ((cmd) << 8) |                 \
-                                         DMSG_HDR_ENCODE(elm))
-
-
-#define DMSG_DBG_SHELL          DMSG_DBG(0x001, dmsg_dbg_shell)
-
-#define DMSG_LNK_CONN           DMSG_LNK(0x011, dmsg_lnk_conn)
-#define DMSG_LNK_VOLCONF        DMSG_LNK(0x020, dmsg_lnk_volconf)
-
-struct dmsg_dbg_shell {
-        dmsg_hdr_t      head;
-};
-
-struct dmsg_lnk_conn {
-        dmsg_hdr_t      head;
-        uuid_t          mediaid;        /* media configuration id */
-        uuid_t          pfs_clid;       /* rendezvous pfs uuid */
-        uuid_t          pfs_fsid;       /* unique pfs uuid */
-        uint64_t        peer_mask;      /* PEER mask for SPAN filtering */
-        uint8_t         peer_type;      /* see DMSG_PEER_xxx */
-        uint8_t         pfs_type;       /* pfs type */
-        uint16_t        proto_version;  /* high level protocol support */
-        uint32_t        status;         /* status flags */
-        uint32_t        rnss;           /* node's generated rnss */
-        uint8_t         reserved02[8];
-        uint32_t        reserved03[12];
-        uint64_t        pfs_mask;       /* PFS mask for SPAN filtering */
-        char            cl_label[128];  /* cluster label (for PEER_BLOCK) */
-        char            fs_label[128];  /* PFS label (for PEER_HAMMER2) */
-};
-
-typedef struct dmsg_lnk_conn dmsg_lnk_conn_t;
-
-#define DMSG_ERR_NOSUPP         0x20
-
-struct dmsg_lnk_span {
-        dmsg_hdr_t      head;
-        uuid_t          pfs_clid;       /* rendezvous pfs uuid */
-        uuid_t          pfs_fsid;       /* unique pfs id (differentiate node) */
-        uint8_t         pfs_type;       /* PFS type */
-        uint8_t         peer_type;      /* PEER type */
-        uint16_t        proto_version;  /* high level protocol support */
-        uint32_t        status;         /* status flags */
-        uint8_t         reserved02[8];
-        uint32_t        dist;           /* span distance */
-        uint32_t        rnss;           /* random number sub-sort */
-        union {
-                uint32_t        reserved03[14];
-                //dmsg_media_block_t block;
-        } media;
-
-        /*
-         * NOTE: for PEER_HAMMER2 cl_label is typically empty and fs_label
-         *       is the superroot directory name.
-         *
-         *       for PEER_BLOCK cl_label is typically host/device and
-         *       fs_label is typically the serial number string.
-         */
-        char            cl_label[128];  /* cluster label */
-        char            fs_label[128];  /* PFS label */
-};
-
-typedef struct dmsg_lnk_span dmsg_lnk_span_t;
-
-#define DMSG_SPAN_PROTO_1       1
-
-/*
-* Structure embedded in e.g. mount, master control structure for
-* DMSG stream handling.
-*/
-struct kdmsg_iocom {
-        struct malloc_type      *mmsg;
-        struct file             *msg_fp;        /* cluster pipe->userland */
-        int                     msg_ctl;        /* wakeup flags */
-        int                     msg_seq;        /* cluster msg sequence id */
-        uint32_t                flags;
-        struct lock             msglk;          /* lockmgr lock */
-        TAILQ_HEAD(, kdmsg_msg) msgq;           /* transmit queue */
-        void                    *handle;
-        void                    (*exit_func)(struct kdmsg_iocom *);
-        struct kdmsg_state      *conn_state;    /* active LNK_CONN state */
-        struct kdmsg_state      *freerd_state;  /* allocation cache */
-        struct kdmsg_state      *freewr_state;  /* allocation cache */
-        dmsg_lnk_conn_t         auto_lnk_conn;
-        dmsg_lnk_span_t         auto_lnk_span;
-};
-
-typedef struct kdmsg_iocom      kdmsg_iocom_t;
-
-struct dmsg_lnk_volconf {
-        dmsg_hdr_t              head;
-        dmsg_vol_data_t         copy;   /* copy spec */
-        int32_t                 index;
-        int32_t                 unused01;
-        uuid_t                  mediaid;
-        int64_t                 reserved02[32];
-};
-
-typedef struct dmsg_lnk_volconf dmsg_lnk_volconf_t;
-
-struct dmsg_lnk_circ {
-        dmsg_hdr_t      head;
-        uint64_t        reserved01;
-        uint64_t        target;
-};
-
-typedef struct dmsg_lnk_circ dmsg_lnk_circ_t;
-typedef struct dmsg_blk_open            dmsg_blk_open_t;
-typedef struct dmsg_blk_error           dmsg_blk_error_t;
-
-union dmsg_any {
-        char                    buf[2048];
-        dmsg_hdr_t              head;
-
-        dmsg_lnk_conn_t         lnk_conn;
-        dmsg_lnk_span_t         lnk_span;
-        dmsg_lnk_circ_t         lnk_circ;
-        dmsg_lnk_volconf_t      lnk_volconf;
-
-        //dmsg_blk_open_t         blk_open;
-        //dmsg_blk_error_t        blk_error;
-        //dmsg_blk_read_t         blk_read;
-        //dmsg_blk_write_t        blk_write;
-        //dmsg_blk_flush_t        blk_flush;
-        //dmsg_blk_freeblks_t     blk_freeblks;
-};
-
-typedef union dmsg_any dmsg_any_t;
-
-struct kdmsg_msg {
-        TAILQ_ENTRY(kdmsg_msg) qentry;          /* serialized queue */
-        struct kdmsg_iocom *iocom;
-        struct kdmsg_state *state;
-        struct kdmsg_circuit *circ;
-        size_t          hdr_size;
-        size_t          aux_size;
-        char            *aux_data;
-        int             flags;
-        dmsg_any_t      any;
-};
-
-#define KDMSG_FLAG_AUXALLOC     0x0001
-#define KDMSG_IOCOMF_AUTOSPAN    0x0002  /* handle received LNK_SPAN */
-#define KDMSG_IOCOMF_AUTOCONN   0x0001  /* handle received LNK_CONN */
-#define KDMSG_IOCOMF_AUTOSPAN   0x0002  /* handle received LNK_SPAN */
-#define KDMSG_IOCOMF_AUTOCIRC   0x0004  /* handle received LNK_CIRC */
-
-typedef struct kdmsg_link kdmsg_link_t;
-typedef struct kdmsg_state kdmsg_state_t;
-typedef struct kdmsg_msg kdmsg_msg_t;
-
-struct hammer2_inode;
-struct hammer2_mount;
-struct hammer2_pfsmount;
-struct hammer2_span;
-struct hammer2_state;
-struct hammer2_msg;
-
 /*
  * The chain structure tracks a portion of the media topology from the
  * root (volume) down.  Chains represent volumes, inodes, indirect blocks,
  * data blocks, and freemap nodes and leafs.
  *
- * The chain structure can be multi-homed and its topological recursion
- * (chain->core) can be shared amongst several chains.  Chain structures
- * are topologically stable once placed in the in-memory topology (they
- * don't move around).  Modifications which cross flush synchronization
- * boundaries, renames, resizing, or any move of the chain to elsewhere
- * in the topology is accomplished via the DELETE-DUPLICATE mechanism.
+ * The chain structure utilizes a simple singly-homed topology and the
+ * chain's in-memory topology will move around as the chains do, due mainly
+ * to renames and indirect block creation.
  *
- * Deletions and delete-duplicates:
+ * Block Table Updates
  *
- *	Any movement of chains within the topology utilize a delete-duplicate
- *	operation instead of a simple rename.  That is, the chain must be
- *	deleted from its original location and then duplicated to the new
- *	location.  A new chain structure is allocated while the old is
- *	deleted.  Deleted chains are removed from the above chain_core's
- *	rbtree but remain linked via the shadow topology for flush
- *	synchronization purposes.
+ *	Block table updates for insertions and updates are delayed until the
+ *	flush.  This allows us to avoid having to modify the parent chain
+ *	all the way to the root.
  *
- *	delete_bmap is allocated and a bit set if the chain was originally
- *	loaded via the blockmap.
+ *	Block table deletions are performed immediately (modifying the parent
+ *	in the process) because the flush code uses the chain structure to
+ *	track delayed updates and the chain will be (likely) gone or moved to
+ *	another location in the topology after a deletion.
  *
- * Flush synchronization:
+ *	A prior iteration of the code tried to keep the relationship intact
+ *	on deletes by doing a delete-duplicate operation on the chain, but
+ *	it added way too much complexity to the codebase.
  *
- *	Flushes must synchronize chains up through the root.  To do this
- *	the in-memory topology would normally have to be frozen during the
- *	flush.  To avoid freezing the topology and to allow concurrent
- *	foreground / flush activity, any new modifications made while a
- *	flush is in progress retains the original chain in a shadow topology
- *	that is only visible to the flush code.  Only one flush can be
- *	running at a time so the shadow hierarchy can be implemented with
- *	just a few link fields in our in-memory data structures.
+ * Flush Synchronization
  *
- * Advantages:
+ *	The flush code must flush modified chains bottom-up.  Because chain
+ *	structures can shift around and are NOT topologically stable,
+ *	modified chains are independently indexed for the flush.  As the flush
+ *	runs it modifies (or further modifies) and updates the parents,
+ *	propagating the flush all the way to the volume root.
  *
- *	(1) Fully coherent snapshots can be taken without requiring
- *	    a pre-flush, resulting in extremely fast (sub-millisecond)
- *	    snapshots.
+ *	Modifying front-end operations can occur during a flush but will block
+ *	in two cases: (1) when the front-end tries to operate on the inode
+ *	currently in the midst of being flushed and (2) if the front-end
+ *	crosses an inode currently being flushed (such as during a rename).
+ *	So, for example, if you rename directory "x" to "a/b/c/d/e/f/g/x" and
+ *	the flusher is currently working on "a/b/c", the rename will block
+ *	temporarily in order to ensure that "x" exists in one place or the
+ *	other.
  *
- *	(2) Multiple synchronization points can be in-flight at the same
- *	    time, representing multiple snapshots or flushes.
+ *	Meta-data statistics are updated by the flusher.  The front-end will
+ *	make estimates but meta-data must be fully synchronized only during a
+ *	flush in order to ensure that it remains correct across a crash.
  *
- *	(3) The algorithms needed to keep track of everything are actually
- *	    not that complex.
+ *	Multiple flush synchronizations can theoretically be in-flight at the
+ *	same time but the implementation is not coded to handle the case and
+ *	currently serializes them.
  *
- * Special Considerations:
+ * Snapshots:
  *
- *	A chain is ref-counted on a per-chain basis, but the chain's lock
- *	is associated with the shared chain_core and is not per-chain.
+ *	Snapshots currently require the subdirectory tree being snapshotted
+ *	to be flushed.  The snapshot then creates a new super-root inode which
+ *	copies the flushed blockdata of the directory or file that was
+ *	snapshotted.
  *
- *	The power-of-2 nature of the media radix tree ensures that there
- *	will be no overlaps which straddle edges.
+ * RBTREE NOTES:
+ *
+ *	- Note that the radix tree runs in powers of 2 only so sub-trees
+ *	  cannot straddle edges.
  */
 RB_HEAD(hammer2_chain_tree, hammer2_chain);
+TAILQ_HEAD(h2_flush_list, hammer2_chain);
 
 #define CHAIN_CORE_DELETE_BMAP_ENTRIES	\
 	(HAMMER2_PBUFSIZE / sizeof(hammer2_blockref_t) / sizeof(uint32_t))
 
+struct hammer2_chain_core {
+	struct ccms_cst	cst;
+	struct hammer2_chain_tree rbtree; /* sub-chains */
+	int		live_zero;	/* blockref array opt */
+	u_int		flags;
+	u_int		live_count;	/* live (not deleted) chains in tree */
+	u_int		chain_count;	/* live + deleted chains under core */
+	int		generation;	/* generation number (inserts only) */
+};
+
+typedef struct hammer2_chain_core hammer2_chain_core_t;
+
 #define HAMMER2_CORE_UNUSED0001		0x0001
 #define HAMMER2_CORE_COUNTEDBREFS	0x0002
 
+/*
+ * H2 is a copy-on-write filesystem.  In order to allow chains to allocate
+ * smaller blocks (down to 64-bytes), but improve performance and make
+ * clustered I/O possible using larger block sizes, the kernel buffer cache
+ * is abstracted via the hammer2_io structure.
+ */
+RB_HEAD(hammer2_io_tree, hammer2_io);
+
+struct hammer2_io {
+	RB_ENTRY(hammer2_io) rbnode;	/* indexed by device offset */
+	struct _atomic_lock *spin;
+	struct hammer2_mount *hmp;
+	struct buf	*bp;
+	struct bio	*bio;
+	off_t		pbase;
+	int		psize;
+	void		(*callback)(struct hammer2_io *dio,
+				    struct hammer2_cluster *cluster,
+				    struct hammer2_chain *chain,
+				    void *arg1, off_t arg2);
+	struct hammer2_cluster *arg_l;		/* INPROG I/O only */
+	struct hammer2_chain *arg_c;		/* INPROG I/O only */
+	void		*arg_p;			/* INPROG I/O only */
+	off_t		arg_o;			/* INPROG I/O only */
+	int		refs;
+	int		act;			/* activity */
+};
+
+typedef struct hammer2_io hammer2_io_t;
 
 /*
  * Primary chain structure keeps track of the topology in-memory.
  */
+struct hammer2_chain {
+	hammer2_chain_core_t	core;
+	RB_ENTRY(hammer2_chain) rbnode;		/* live chain(s) */
+	hammer2_blockref_t	bref;
+	struct hammer2_chain	*parent;
+	struct hammer2_state	*state;		/* if active cache msg */
+	struct hammer2_mount	*hmp;
+	struct hammer2_pfsmount	*pmp;		/* (pfs-cluster pmp or spmp) */
 
-//int hammer2_chain_cmp(hammer2_chain_t *chain1, hammer2_chain_t *chain2);
+	hammer2_xid_t	flush_xid;		/* flush sequencing */
+	hammer2_key_t   data_count;		/* delta's to apply */
+	hammer2_key_t   inode_count;		/* delta's to apply */
+	hammer2_key_t   data_count_up;		/* delta's to apply */
+	hammer2_key_t   inode_count_up;		/* delta's to apply */
+	hammer2_io_t	*dio;			/* physical data buffer */
+	u_int		bytes;			/* physical data size */
+	u_int		flags;
+	u_int		refs;
+	u_int		lockcnt;
+	hammer2_media_data_t *data;		/* data pointer shortcut */
+	TAILQ_ENTRY(hammer2_chain) flush_node;	/* flush list */
+};
+
+typedef struct hammer2_chain hammer2_chain_t;
+
+int hammer2_chain_cmp(hammer2_chain_t *chain1, hammer2_chain_t *chain2);
 RB_PROTOTYPE(hammer2_chain_tree, hammer2_chain, rbnode, hammer2_chain_cmp);
 
 /*
@@ -1014,29 +825,39 @@ RB_PROTOTYPE(hammer2_chain_tree, hammer2_chain, rbnode, hammer2_chain_cmp);
  *	     is primarily used for indirect blocks.
  *
  * MODIFIED- The chain's media data has been modified.
+ * UPDATE  - Chain might not be modified but parent blocktable needs update
+ *
+ * BMAPPED - Indicates that the chain is present in the parent blockmap.
+ * BMAPUPD - Indicates that the chain is present but needs to be updated
+ *	     in the parent blockmap.
  */
 #define HAMMER2_CHAIN_MODIFIED		0x00000001	/* dirty chain data */
 #define HAMMER2_CHAIN_ALLOCATED		0x00000002	/* kmalloc'd chain */
-#define HAMMER2_CHAIN_FLUSH_TEMPORARY	0x00000004
-#define HAMMER2_CHAIN_FORCECOW		0x00000008	/* force copy-on-wr */
+#define HAMMER2_CHAIN_DESTROY		0x00000004
+#define HAMMER2_CHAIN_UNUSED00000008	0x00000008
 #define HAMMER2_CHAIN_DELETED		0x00000010	/* deleted chain */
 #define HAMMER2_CHAIN_INITIAL		0x00000020	/* initial create */
-#define HAMMER2_CHAIN_FLUSH_CREATE	0x00000040	/* needs flush blkadd */
-#define HAMMER2_CHAIN_FLUSH_DELETE	0x00000080	/* needs flush blkdel */
+#define HAMMER2_CHAIN_UPDATE		0x00000040	/* need parent update */
+#define HAMMER2_CHAIN_DEFERRED		0x00000080	/* flush depth defer */
 #define HAMMER2_CHAIN_IOFLUSH		0x00000100	/* bawrite on put */
-#define HAMMER2_CHAIN_DEFERRED		0x00000200	/* on a deferral list */
-#define HAMMER2_CHAIN_UNLINKED		0x00000400	/* delete on reclaim */
+#define HAMMER2_CHAIN_ONFLUSH		0x00000200	/* on a flush list */
+#define HAMMER2_CHAIN_UNUSED00000400	0x00000400
 #define HAMMER2_CHAIN_VOLUMESYNC	0x00000800	/* needs volume sync */
-#define HAMMER2_CHAIN_ONDBQ		0x00001000	/* !bmapped deletes */
+#define HAMMER2_CHAIN_UNUSED00001000	0x00001000
 #define HAMMER2_CHAIN_MOUNTED		0x00002000	/* PFS is mounted */
 #define HAMMER2_CHAIN_ONRBTREE		0x00004000	/* on parent RB tree */
 #define HAMMER2_CHAIN_SNAPSHOT		0x00008000	/* snapshot special */
 #define HAMMER2_CHAIN_EMBEDDED		0x00010000	/* embedded data */
 #define HAMMER2_CHAIN_RELEASE		0x00020000	/* don't keep around */
-#define HAMMER2_CHAIN_BMAPPED		0x00040000	/* in parent blkmap */
-#define HAMMER2_CHAIN_ONDBTREE		0x00080000	/* bmapped deletes */
-#define HAMMER2_CHAIN_DUPLICATED	0x00100000	/* fwd delete-dup */
-#define HAMMER2_CHAIN_PFSROOT		0x00200000	/* in pfs->cluster */
+#define HAMMER2_CHAIN_BMAPPED		0x00040000	/* present in blkmap */
+#define HAMMER2_CHAIN_BMAPUPD		0x00080000	/* +needs updating */
+#define HAMMER2_CHAIN_UNUSED00100000	0x00100000
+#define HAMMER2_CHAIN_UNUSED00200000	0x00200000
+#define HAMMER2_CHAIN_PFSBOUNDARY	0x00400000	/* super->pfs inode */
+
+#define HAMMER2_CHAIN_FLUSH_MASK	(HAMMER2_CHAIN_MODIFIED |	\
+					 HAMMER2_CHAIN_UPDATE |		\
+					 HAMMER2_CHAIN_ONFLUSH)
 
 /*
  * Flags passed to hammer2_chain_lookup() and hammer2_chain_next()
@@ -1060,9 +881,8 @@ RB_PROTOTYPE(hammer2_chain_tree, hammer2_chain, rbnode, hammer2_chain_cmp);
  */
 #define HAMMER2_MODIFY_OPTDATA		0x00000002	/* data can be NULL */
 #define HAMMER2_MODIFY_NO_MODIFY_TID	0x00000004
-#define HAMMER2_MODIFY_ASSERTNOCOPY	0x00000008	/* assert no del-dup */
+#define HAMMER2_MODIFY_UNUSED0008	0x00000008
 #define HAMMER2_MODIFY_NOREALLOC	0x00000010
-#define HAMMER2_MODIFY_INPLACE		0x00000020	/* don't del-dup */
 
 /*
  * Flags passed to hammer2_chain_lock()
@@ -1078,7 +898,10 @@ RB_PROTOTYPE(hammer2_chain_tree, hammer2_chain, rbnode, hammer2_chain_cmp);
 /*
  * Flags passed to hammer2_chain_delete()
  */
-#define HAMMER2_DELETE_UNUSED0001	0x0001
+#define HAMMER2_DELETE_PERMANENT	0x0001
+#define HAMMER2_DELETE_NOSTATS		0x0002
+
+#define HAMMER2_INSERT_NOSTATS		0x0002
 
 /*
  * Flags passed to hammer2_chain_delete_duplicate()
@@ -1104,11 +927,6 @@ RB_PROTOTYPE(hammer2_chain_tree, hammer2_chain, rbnode, hammer2_chain_cmp);
  */
 #define HAMMER2_BMAP_COUNT		16	/* max bmap read-ahead */
 #define HAMMER2_BMAP_BYTES		(HAMMER2_PBUFSIZE * HAMMER2_BMAP_COUNT)
-
-/*
- * Misc
- */
-#define HAMMER2_FLUSH_DEPTH_LIMIT	10	/* stack recursion limit */
 
 /*
  * hammer2_freemap_adjust()
@@ -1137,12 +955,25 @@ RB_PROTOTYPE(hammer2_chain_tree, hammer2_chain, rbnode, hammer2_chain_cmp);
  */
 #define HAMMER2_MAXCLUSTER	8
 
+struct hammer2_cluster {
+	int			status;		/* operational status */
+	int			refs;		/* track for deallocation */
+	struct hammer2_pfsmount	*pmp;
+	uint32_t		flags;
+	int			nchains;
+	hammer2_chain_t		*focus;		/* current focus (or mod) */
+	hammer2_chain_t		*array[HAMMER2_MAXCLUSTER];
+	char			missed[HAMMER2_MAXCLUSTER];
+	int			cache_index[HAMMER2_MAXCLUSTER];
+};
 
-#define HAMMER2_CLUSTER_PFS	0x00000001	/* embedded in pfsmount */
-#define HAMMER2_CLUSTER_INODE	0x00000002	/* embedded in inode */
+typedef struct hammer2_cluster hammer2_cluster_t;
+
+#define HAMMER2_CLUSTER_INODE	0x00000001	/* embedded in inode */
+#define HAMMER2_CLUSTER_NOSYNC	0x00000002	/* not in sync (cumulative) */
 
 
-//RB_HEAD(hammer2_inode_tree, hammer2_inode);
+RB_HEAD(hammer2_inode_tree, hammer2_inode);
 
 /*
  * A hammer2 inode.
@@ -1150,6 +981,23 @@ RB_PROTOTYPE(hammer2_chain_tree, hammer2_chain, rbnode, hammer2_chain_cmp);
  * NOTE: The inode's attribute CST which is also used to lock the inode
  *	 is embedded in the chain (chain.cst) and aliased w/ attr_cst.
  */
+struct hammer2_inode {
+	RB_ENTRY(hammer2_inode) rbnode;		/* inumber lookup (HL) */
+	ccms_cst_t		topo_cst;	/* directory topology cst */
+	struct hammer2_pfsmount	*pmp;		/* PFS mount */
+	struct hammer2_inode	*pip;		/* parent inode */
+	struct vnode		*vp;
+	hammer2_cluster_t	cluster;
+	struct lockf		advlock;
+	hammer2_tid_t		inum;
+	u_int			flags;
+	u_int			refs;		/* +vpref, +flushref */
+	uint8_t			comp_heuristic;
+	hammer2_off_t		size;
+	uint64_t		mtime;
+};
+
+typedef struct hammer2_inode hammer2_inode_t;
 
 #define HAMMER2_INODE_MODIFIED		0x0001
 #define HAMMER2_INODE_SROOT		0x0002	/* kmalloc special case */
@@ -1157,10 +1005,28 @@ RB_PROTOTYPE(hammer2_chain_tree, hammer2_chain, rbnode, hammer2_chain_cmp);
 #define HAMMER2_INODE_ONRBTREE		0x0008
 #define HAMMER2_INODE_RESIZED		0x0010
 #define HAMMER2_INODE_MTIME		0x0020
+#define HAMMER2_INODE_UNLINKED		0x0040
 
-#define RB_PROTOTYPE2(name, type, field, cmp, datatype)			
-//RB_PROTOTYPE2(hammer2_inode_tree, hammer2_inode, rbnode, hammer2_inode_cmp,
-//		hammer2_tid_t);
+int hammer2_inode_cmp(hammer2_inode_t *ip1, hammer2_inode_t *ip2);
+
+/*
+* A version which supplies a fast lookup routine for an exact match
+* on a numeric field.
+*/
+
+RB_PROTOTYPE2(hammer2_inode_tree, hammer2_inode, rbnode, hammer2_inode_cmp,
+		hammer2_tid_t);
+
+/*
+ * inode-unlink side-structure
+ */
+struct hammer2_inode_unlink {
+	TAILQ_ENTRY(hammer2_inode_unlink) entry;
+	hammer2_inode_t	*ip;
+};
+TAILQ_HEAD(h2_unlk_list, hammer2_inode_unlink);
+
+typedef struct hammer2_inode_unlink hammer2_inode_unlink_t;
 
 /*
  * A hammer2 transaction and flush sequencing structure.
@@ -1204,14 +1070,13 @@ RB_PROTOTYPE(hammer2_chain_tree, hammer2_chain, rbnode, hammer2_chain_cmp);
  *     The chains typically terminate as they fly onto the disk.  The flush
  *     ultimately reaches the volume header.
  */
+
 struct hammer2_trans {
 	TAILQ_ENTRY(hammer2_trans) entry;
-	struct hammer2_pfsmount *pmp;		/* might be NULL */
-	struct hammer2_mount	*hmp_single;	/* if single-targetted */
-	hammer2_tid_t		orig_tid;
-	hammer2_tid_t		sync_tid;	/* effective transaction id */
-	hammer2_tid_t		inode_tid;
-	struct 	proc		*td;		/* pointer */
+	struct hammer2_pfsmount *pmp;
+	hammer2_xid_t		sync_xid;
+	hammer2_tid_t		inode_tid;	/* inode number assignment */
+	thread_t		td;		/* pointer */
 	int			flags;
 	int			blocked;
 	uint8_t			inodes_created;
@@ -1224,7 +1089,7 @@ typedef struct hammer2_trans hammer2_trans_t;
 #define HAMMER2_TRANS_CONCURRENT	0x0002	/* concurrent w/flush */
 #define HAMMER2_TRANS_BUFCACHE		0x0004	/* from bioq strategy write */
 #define HAMMER2_TRANS_NEWINODE		0x0008	/* caller allocating inode */
-#define HAMMER2_TRANS_ISALLOCATING	0x0010	/* in allocator */
+#define HAMMER2_TRANS_FREEBATCH		0x0010	/* batch freeing code */
 #define HAMMER2_TRANS_PREFLUSH		0x0020	/* preflush state */
 
 #define HAMMER2_FREEMAP_HEUR_NRADIX	4	/* pwr 2 PBUFRADIX-MINIORADIX */
@@ -1232,13 +1097,53 @@ typedef struct hammer2_trans hammer2_trans_t;
 #define HAMMER2_FREEMAP_HEUR		(HAMMER2_FREEMAP_HEUR_NRADIX * \
 					 HAMMER2_FREEMAP_HEUR_TYPES)
 
-#define HAMMER2_CLUSTER_COPY_CHAINS	0x0001	/* copy chains */
-#define HAMMER2_CLUSTER_COPY_NOREF	0x0002	/* do not ref chains */
+#define HAMMER2_CLUSTER_COPY_NOCHAINS	0x0001	/* do not copy or ref chains */
+#define HAMMER2_CLUSTER_COPY_NOREF	0x0002	/* do not ref chains or cl */
+
+/*
+ * Transaction Rendezvous
+ */
+TAILQ_HEAD(hammer2_trans_queue, hammer2_trans);
+
+struct hammer2_trans_manage {
+	hammer2_xid_t		flush_xid;	/* last flush transaction */
+	hammer2_xid_t		alloc_xid;
+	struct lock		translk;	/* lockmgr lock */
+	struct hammer2_trans_queue transq;	/* modifying transactions */
+	int			flushcnt;	/* track flush trans */
+};
+
+typedef struct hammer2_trans_manage hammer2_trans_manage_t;
 
 /*
  * Global (per device) mount structure for device (aka vp->v_mount->hmp)
  */
-TAILQ_HEAD(hammer2_trans_queue, hammer2_trans);
+struct hammer2_mount {
+	struct vnode	*devvp;		/* device vnode */
+	int		ronly;		/* read-only mount */
+	int		pmp_count;	/* PFS mounts backed by us */
+	TAILQ_ENTRY(hammer2_mount) mntentry; /* hammer2_mntlist */
+
+	struct malloc_type *mchain;
+	int		nipstacks;
+	int		maxipstacks;
+	kdmsg_iocom_t	iocom;		/* volume-level dmsg interface */
+	struct _atomic_lock *io_spin;	/* iotree access */
+	struct hammer2_io_tree iotree;
+	int		iofree_count;
+	hammer2_chain_t vchain;		/* anchor chain (topology) */
+	hammer2_chain_t fchain;		/* anchor chain (freemap) */
+	struct _atomic_lock *list_spin;
+	struct h2_flush_list	flushq;	/* flush seeds */
+	struct hammer2_pfsmount *spmp;	/* super-root pmp for transactions */
+	struct lock	vollk;		/* lockmgr lock */
+	hammer2_off_t	heur_freemap[HAMMER2_FREEMAP_HEUR];
+	int		volhdrno;	/* last volhdrno written */
+	hammer2_volume_data_t voldata;
+	hammer2_volume_data_t volsync;	/* synchronized voldata */
+};
+
+typedef struct hammer2_mount hammer2_mount_t;
 
 /*
  * HAMMER2 PFS mount point structure (aka vp->v_mount->mnt_data).
@@ -1255,17 +1160,38 @@ TAILQ_HEAD(hammer2_trans_queue, hammer2_trans);
  * representitive file) that simply contains a bootstrap volume header
  * listing the configuration.
  */
-
-/* struct bio_queue_head {
-TAILQ_HEAD(bio_queue, bio) queue;
-off_t last_offset;
-struct  bio *insert_point;
-}; */
-
-struct mtx {
-int     owned;
-struct mtx *parent;
+struct hammer2_pfsmount {
+	struct mount		*mp;
+	TAILQ_ENTRY(hammer2_pfsmount) mntentry; /* hammer2_pfslist */
+	uuid_t			pfs_clid;
+	uuid_t			pfs_fsid;
+	hammer2_mount_t		*spmp_hmp;	/* (spmp only) */
+	hammer2_inode_t		*iroot;		/* PFS root inode */
+	hammer2_inode_t		*ihidden;	/* PFS hidden directory */
+	struct lock		lock;		/* PFS lock for certain ops */
+	hammer2_off_t		inode_count;	/* copy of inode_count */
+	ccms_domain_t		ccms_dom;
+	struct netexport	export;		/* nfs export */
+	int			ronly;		/* read-only mount */
+	struct malloc_type	*minode;
+	struct malloc_type	*mmsg;
+	struct i_atomic_lock    *inum_spin;	/* inumber lookup */
+	struct hammer2_inode_tree inum_tree;	/* (not applicable to spmp) */
+	hammer2_tid_t		alloc_tid;
+	hammer2_tid_t		flush_tid;
+	hammer2_tid_t		inode_tid;
+	long			inmem_inodes;
+	uint32_t		inmem_dirty_chains;
+	int			count_lwinprog;	/* logical write in prog */
+	struct i_atomic_lock *list_spin;
+	struct h2_unlk_list	unlinkq;	/* last-close unlink */
+	thread_t		wthread_td;	/* write thread td */
+	struct bio_queue_head	wthread_bioq;	/* logical buffer bioq */
+	struct mutex		*wthread_mtx;	/* interlock */
+	int			wthread_destroy;/* termination sequencing */
 };
+
+typedef struct hammer2_pfsmount hammer2_pfsmount_t;
 
 #define HAMMER2_DIRTYCHAIN_WAITING	0x80000000
 #define HAMMER2_DIRTYCHAIN_MASK		0x7FFFFFFF
@@ -1274,8 +1200,6 @@ struct mtx *parent;
 #define HAMMER2_LWINPROG_MASK		0x7FFFFFFF
 
 #if defined(_KERNEL)
-
-//MALLOC_DECLARE(M_HAMMER2);
 
 #define VTOI(vp)	((hammer2_inode_t *)(vp)->v_data)
 #define ITOV(ip)	((ip)->vp)
@@ -1298,15 +1222,39 @@ hammer2_devblkradix(int radix)
 	}
 }
 
-extern struct vops hammer2_vnode_vops;
-extern struct vops hammer2_spec_vops;
-extern struct vops hammer2_fifo_vops;
+static __inline
+size_t
+hammer2_devblksize(size_t bytes)
+{
+	if (bytes <= HAMMER2_LBUFSIZE) {
+		return(HAMMER2_LBUFSIZE);
+	} else {
+		KKASSERT(bytes <= HAMMER2_PBUFSIZE &&
+			 (bytes ^ (bytes - 1)) == ((bytes << 1) - 1));
+		return (HAMMER2_PBUFSIZE);
+	}
+}
+
+static __inline
+hammer2_pfsmount_t *
+MPTOPMP(struct mount *mp)
+{
+	return ((hammer2_pfsmount_t *)mp->mnt_data);
+}
+
+//struct thread *curthread;
+
+#define LOCKSTART	int __nlocks = curthread->td_locks
+#define LOCKENTER	(++curthread->td_locks)
+#define LOCKEXIT	(--curthread->td_locks)
+#define LOCKSTOP	KKASSERT(curthread->td_locks == __nlocks)
 
 extern int hammer2_debug;
 extern int hammer2_cluster_enable;
 extern int hammer2_hardlink_enable;
 extern int hammer2_flush_pipe;
 extern int hammer2_synchronous_flush;
+extern int hammer2_dio_count;
 extern long hammer2_limit_dirty_chains;
 extern long hammer2_iod_file_read;
 extern long hammer2_iod_meta_read;
@@ -1329,19 +1277,356 @@ extern long hammer2_ioa_indr_write;
 extern long hammer2_ioa_fmap_write;
 extern long hammer2_ioa_volu_write;
 
-extern struct objcache *cache_buffer_read;
+extern struct vnode *cache_buffer_read;
 extern struct objcache *cache_buffer_write;
 
 extern int destroy;
 extern int write_thread_wakeup;
 
-//  XX extern mtx_t thread_protect;
+/*
+ * hammer2_subr.c
+ */
+#define hammer2_icrc32(buf, size)	iscsi_crc32((buf), (size))
+#define hammer2_icrc32c(buf, size, crc)	iscsi_crc32_ext((buf), (size), (crc))
+
+hammer2_cluster_t *hammer2_inode_lock_ex(hammer2_inode_t *ip);
+hammer2_cluster_t *hammer2_inode_lock_sh(hammer2_inode_t *ip);
+void hammer2_inode_unlock_ex(hammer2_inode_t *ip, hammer2_cluster_t *chain);
+void hammer2_inode_unlock_sh(hammer2_inode_t *ip, hammer2_cluster_t *chain);
+ccms_state_t hammer2_inode_lock_temp_release(hammer2_inode_t *ip);
+void hammer2_inode_lock_temp_restore(hammer2_inode_t *ip, ccms_state_t ostate);
+ccms_state_t hammer2_inode_lock_upgrade(hammer2_inode_t *ip);
+void hammer2_inode_lock_downgrade(hammer2_inode_t *ip, ccms_state_t ostate);
+
+void hammer2_mount_exlock(hammer2_mount_t *hmp);
+void hammer2_mount_shlock(hammer2_mount_t *hmp);
+void hammer2_mount_unlock(hammer2_mount_t *hmp);
+
+int hammer2_get_dtype(const hammer2_inode_data_t *ipdata);
+int hammer2_get_vtype(const hammer2_inode_data_t *ipdata);
+u_int8_t hammer2_get_obj_type(enum vtype vtype);
+void hammer2_time_to_timespec(u_int64_t xtime, struct timespec *ts);
+u_int64_t hammer2_timespec_to_time(const struct timespec *ts);
+u_int32_t hammer2_to_unix_xid(const uuid_t *uuid);
+void hammer2_guid_to_uuid(uuid_t *uuid, u_int32_t guid);
+hammer2_xid_t hammer2_trans_newxid(hammer2_pfsmount_t *pmp);
+void hammer2_trans_manage_init(void);
+
+hammer2_key_t hammer2_dirhash(const unsigned char *name, size_t len);
+int hammer2_getradix(size_t bytes);
+
+int hammer2_calc_logical(hammer2_inode_t *ip, hammer2_off_t uoff,
+			hammer2_key_t *lbasep, hammer2_key_t *leofp);
+int hammer2_calc_physical(hammer2_inode_t *ip,
+			const hammer2_inode_data_t *ipdata,
+			hammer2_key_t lbase);
+void hammer2_update_time(uint64_t *timep);
+void hammer2_adjreadcounter(hammer2_blockref_t *bref, size_t bytes);
+
+/*
+ * hammer2_inode.c
+ */
+struct vnode *hammer2_igetv(hammer2_inode_t *ip, hammer2_cluster_t *cparent,
+			int *errorp);
+void hammer2_inode_lock_nlinks(hammer2_inode_t *ip);
+void hammer2_inode_unlock_nlinks(hammer2_inode_t *ip);
+hammer2_inode_t *hammer2_inode_lookup(hammer2_pfsmount_t *pmp,
+			hammer2_tid_t inum);
+hammer2_inode_t *hammer2_inode_get(hammer2_pfsmount_t *pmp,
+			hammer2_inode_t *dip, hammer2_cluster_t *cluster);
+void hammer2_inode_free(hammer2_inode_t *ip);
+void hammer2_inode_ref(hammer2_inode_t *ip);
+void hammer2_inode_drop(hammer2_inode_t *ip);
+void hammer2_inode_repoint(hammer2_inode_t *ip, hammer2_inode_t *pip,
+			hammer2_cluster_t *cluster);
+void hammer2_run_unlinkq(hammer2_trans_t *trans, hammer2_pfsmount_t *pmp);
+
+hammer2_inode_t *hammer2_inode_create(hammer2_trans_t *trans,
+			hammer2_inode_t *dip,
+			struct vattr *vap, struct ucred *cred,
+			const uint8_t *name, size_t name_len,
+			hammer2_cluster_t **clusterp, int *errorp);
+int hammer2_inode_connect(hammer2_trans_t *trans,
+			hammer2_cluster_t **clusterp, int hlink,
+			hammer2_inode_t *dip, hammer2_cluster_t *dcluster,
+			const uint8_t *name, size_t name_len,
+			hammer2_key_t key);
+hammer2_inode_t *hammer2_inode_common_parent(hammer2_inode_t *fdip,
+			hammer2_inode_t *tdip);
+void hammer2_inode_fsync(hammer2_trans_t *trans, hammer2_inode_t *ip,
+			hammer2_cluster_t *cparent);
+int hammer2_unlink_file(hammer2_trans_t *trans, hammer2_inode_t *dip,
+			const uint8_t *name, size_t name_len, int isdir,
+			int *hlinkp, struct nchandle *nch, int nlinks);
+int hammer2_hardlink_consolidate(hammer2_trans_t *trans,
+			hammer2_inode_t *ip, hammer2_cluster_t **clusterp,
+			hammer2_inode_t *cdip, hammer2_cluster_t *cdcluster,
+			int nlinks);
+int hammer2_hardlink_deconsolidate(hammer2_trans_t *trans, hammer2_inode_t *dip,
+			hammer2_chain_t **chainp, hammer2_chain_t **ochainp);
+int hammer2_hardlink_find(hammer2_inode_t *dip, hammer2_cluster_t **cparentp,
+			hammer2_cluster_t *cluster);
+int hammer2_parent_find(hammer2_cluster_t **cparentp,
+			hammer2_cluster_t *cluster);
+void hammer2_inode_install_hidden(hammer2_pfsmount_t *pmp);
+
+/*
+ * hammer2_chain.c
+ */
+void hammer2_voldata_lock(hammer2_mount_t *hmp);
+void hammer2_voldata_unlock(hammer2_mount_t *hmp);
+void hammer2_voldata_modify(hammer2_mount_t *hmp);
+hammer2_chain_t *hammer2_chain_alloc(hammer2_mount_t *hmp,
+				hammer2_pfsmount_t *pmp,
+				hammer2_trans_t *trans,
+				hammer2_blockref_t *bref);
+void hammer2_chain_core_alloc(hammer2_trans_t *trans, hammer2_chain_t *chain);
+void hammer2_chain_ref(hammer2_chain_t *chain);
+void hammer2_chain_drop(hammer2_chain_t *chain);
+int hammer2_chain_lock(hammer2_chain_t *chain, int how);
+void hammer2_chain_load_async(hammer2_cluster_t *cluster,
+				void (*func)(hammer2_io_t *dio,
+					     hammer2_cluster_t *cluster,
+					     hammer2_chain_t *chain,
+					     void *arg_p, off_t arg_o),
+				void *arg_p);
+void hammer2_chain_moved(hammer2_chain_t *chain);
+void hammer2_chain_modify(hammer2_trans_t *trans,
+				hammer2_chain_t *chain, int flags);
+void hammer2_chain_resize(hammer2_trans_t *trans, hammer2_inode_t *ip,
+				hammer2_chain_t *parent,
+				hammer2_chain_t *chain,
+				int nradix, int flags);
+void hammer2_chain_unlock(hammer2_chain_t *chain);
+void hammer2_chain_wait(hammer2_chain_t *chain);
+hammer2_chain_t *hammer2_chain_get(hammer2_chain_t *parent, int generation,
+				hammer2_blockref_t *bref);
+hammer2_chain_t *hammer2_chain_lookup_init(hammer2_chain_t *parent, int flags);
+void hammer2_chain_lookup_done(hammer2_chain_t *parent);
+hammer2_chain_t *hammer2_chain_lookup(hammer2_chain_t **parentp,
+				hammer2_key_t *key_nextp,
+				hammer2_key_t key_beg, hammer2_key_t key_end,
+				int *cache_indexp, int flags, int *ddflagp);
+hammer2_chain_t *hammer2_chain_next(hammer2_chain_t **parentp,
+				hammer2_chain_t *chain,
+				hammer2_key_t *key_nextp,
+				hammer2_key_t key_beg, hammer2_key_t key_end,
+				int *cache_indexp, int flags);
+hammer2_chain_t *hammer2_chain_scan(hammer2_chain_t *parent,
+				hammer2_chain_t *chain,
+				int *cache_indexp, int flags);
+
+int hammer2_chain_create(hammer2_trans_t *trans, hammer2_chain_t **parentp,
+				hammer2_chain_t **chainp,
+				hammer2_pfsmount_t *pmp,
+				hammer2_key_t key, int keybits,
+				int type, size_t bytes, int flags);
+void hammer2_chain_rename(hammer2_trans_t *trans, hammer2_blockref_t *bref,
+				hammer2_chain_t **parentp,
+				hammer2_chain_t *chain, int flags);
+int hammer2_chain_snapshot(hammer2_trans_t *trans, hammer2_chain_t **chainp,
+				hammer2_ioc_pfs_t *pfs);
+void hammer2_chain_delete(hammer2_trans_t *trans, hammer2_chain_t *parent,
+				hammer2_chain_t *chain, int flags);
+void hammer2_chain_delete_duplicate(hammer2_trans_t *trans,
+				hammer2_chain_t **chainp, int flags);
+void hammer2_flush(hammer2_trans_t *trans, hammer2_chain_t *chain);
+void hammer2_chain_commit(hammer2_trans_t *trans, hammer2_chain_t *chain);
+void hammer2_chain_setflush(hammer2_trans_t *trans, hammer2_chain_t *chain);
+void hammer2_chain_countbrefs(hammer2_chain_t *chain,
+				hammer2_blockref_t *base, int count);
+
+void hammer2_chain_setcheck(hammer2_chain_t *chain, void *bdata);
+int hammer2_chain_testcheck(hammer2_chain_t *chain, void *bdata);
+
+
+void hammer2_pfs_memory_wait(hammer2_pfsmount_t *pmp);
+void hammer2_pfs_memory_inc(hammer2_pfsmount_t *pmp);
+void hammer2_pfs_memory_wakeup(hammer2_pfsmount_t *pmp);
+
+void hammer2_base_delete(hammer2_trans_t *trans, hammer2_chain_t *chain,
+				hammer2_blockref_t *base, int count,
+				int *cache_indexp, hammer2_chain_t *child);
+void hammer2_base_insert(hammer2_trans_t *trans, hammer2_chain_t *chain,
+				hammer2_blockref_t *base, int count,
+				int *cache_indexp, hammer2_chain_t *child);
+
+static __inline void cpu_ccfence(void);
+
+/*
+* cpu_ccfence() prevents the compiler from reordering instructions, in
+* particular stores, relative to the current cpu. Use cpu_sfence() if
+* you need to guarentee ordering by both the compiler and by the cpu.
+*
+* This also prevents the compiler from caching memory loads into local
+* variables across the routine.
+*/
+static __inline void
+cpu_ccfence(void)
+{
+        __asm __volatile("" : : : "memory");
+}
+
+
+
+/*
+ * hammer2_trans.c
+ */
+void hammer2_trans_init(hammer2_trans_t *trans, hammer2_pfsmount_t *pmp,
+				int flags);
+void hammer2_trans_spmp(hammer2_trans_t *trans, hammer2_pfsmount_t *pmp);
+void hammer2_trans_done(hammer2_trans_t *trans);
+
+/*
+ * hammer2_ioctl.c
+ */
+int hammer2_ioctl(hammer2_inode_t *ip, u_long com, void *data,
+				int fflag, struct ucred *cred);
+
+/*
+ * hammer2_io.c
+ */
+struct file *holdfp(struct filedesc *fdp, int fd, int flag);
+void fhold(struct file *fp);
+void vfs_bio_clrbuf(struct buf *bp);
+
+hammer2_io_t *hammer2_io_getblk(hammer2_mount_t *hmp, off_t lbase,
+				int lsize, int *ownerp);
+void hammer2_io_putblk(hammer2_io_t **diop);
+void hammer2_io_cleanup(hammer2_mount_t *hmp, struct hammer2_io_tree *tree);
+char *hammer2_io_data(hammer2_io_t *dio, off_t lbase);
+int hammer2_io_new(hammer2_mount_t *hmp, off_t lbase, int lsize,
+				hammer2_io_t **diop);
+int hammer2_io_newnz(hammer2_mount_t *hmp, off_t lbase, int lsize,
+				hammer2_io_t **diop);
+int hammer2_io_newq(hammer2_mount_t *hmp, off_t lbase, int lsize,
+				hammer2_io_t **diop);
+int hammer2_io_bread(hammer2_mount_t *hmp, off_t lbase, int lsize,
+				hammer2_io_t **diop);
+void hammer2_io_breadcb(hammer2_mount_t *hmp, off_t lbase, int lsize,
+				void (*callback)(hammer2_io_t *dio,
+						 hammer2_cluster_t *arg_l,
+						 hammer2_chain_t *arg_c,
+						 void *arg_p, off_t arg_o),
+				hammer2_cluster_t *arg_l,
+				hammer2_chain_t *arg_c,
+				void *arg_p, off_t arg_o);
+void hammer2_io_bawrite(hammer2_io_t **diop);
+void hammer2_io_bdwrite(hammer2_io_t **diop);
+int hammer2_io_bwrite(hammer2_io_t **diop);
+int hammer2_io_isdirty(hammer2_io_t *dio);
+void hammer2_io_setdirty(hammer2_io_t *dio);
+void hammer2_io_setinval(hammer2_io_t *dio, u_int bytes);
+void hammer2_io_brelse(hammer2_io_t **diop);
+void hammer2_io_bqrelse(hammer2_io_t **diop);
+
+static __inline int
+cluster_read(struct vnode *vp, off_t filesize, off_t loffset,
+daddr_t blksize, size_t minreq, size_t maxreq, struct buf **bpp)
+{
+        *bpp = NULL;
+        // return(cluster_readx(vp, filesize, loffset, blksize, minreq,
+        // fix me return(breadn(vp, filesize, loffset, (int64_t)blksize, (int *)minreq,
+        //      maxreq, bpp));
+        return 0;
+}
+
 
 /*
  * hammer2_msgops.c
  */
 int hammer2_msg_dbg_rcvmsg(kdmsg_msg_t *msg);
 int hammer2_msg_adhoc_input(kdmsg_msg_t *msg);
+
+/*
+ * hammer2_vfsops.c
+ */
+void hammer2_clusterctl_wakeup(kdmsg_iocom_t *iocom);
+void hammer2_volconf_update(hammer2_mount_t *hmp, int index);
+void hammer2_cluster_reconnect(hammer2_mount_t *hmp, struct file *fp);
+void hammer2_dump_chain(hammer2_chain_t *chain, int tab, int *countp, char pfx);
+void hammer2_bioq_sync(hammer2_pfsmount_t *pmp);
+int hammer2_vfs_sync(struct mount *mp, int waitflags);
+void hammer2_lwinprog_ref(hammer2_pfsmount_t *pmp);
+void hammer2_lwinprog_drop(hammer2_pfsmount_t *pmp);
+void hammer2_lwinprog_wait(hammer2_pfsmount_t *pmp);
+
+struct mtx;
+int mtxsleep(void *, struct mutex *, int, const char *, int);
+
+/*
+ * hammer2_freemap.c
+ */
+int hammer2_freemap_alloc(hammer2_trans_t *trans, hammer2_chain_t *chain,
+				size_t bytes);
+void hammer2_freemap_adjust(hammer2_trans_t *trans, hammer2_mount_t *hmp,
+				hammer2_blockref_t *bref, int how);
+
+/*
+ * hammer2_cluster.c
+ */
+int hammer2_cluster_need_resize(hammer2_cluster_t *cluster, int bytes);
+uint8_t hammer2_cluster_type(hammer2_cluster_t *cluster);
+hammer2_media_data_t *hammer2_cluster_data(hammer2_cluster_t *cluster);
+hammer2_media_data_t *hammer2_cluster_wdata(hammer2_cluster_t *cluster);
+hammer2_cluster_t *hammer2_cluster_from_chain(hammer2_chain_t *chain);
+int hammer2_cluster_modified(hammer2_cluster_t *cluster);
+int hammer2_cluster_duplicated(hammer2_cluster_t *cluster);
+void hammer2_cluster_set_chainflags(hammer2_cluster_t *cluster, uint32_t flags);
+void hammer2_cluster_bref(hammer2_cluster_t *cluster, hammer2_blockref_t *bref);
+void hammer2_cluster_setflush(hammer2_trans_t *trans,
+			hammer2_cluster_t *cluster);
+void hammer2_cluster_setmethod_check(hammer2_trans_t *trans,
+			hammer2_cluster_t *cluster, int check_algo);
+hammer2_cluster_t *hammer2_cluster_alloc(hammer2_pfsmount_t *pmp,
+			hammer2_trans_t *trans,
+			hammer2_blockref_t *bref);
+void hammer2_cluster_ref(hammer2_cluster_t *cluster);
+void hammer2_cluster_drop(hammer2_cluster_t *cluster);
+void hammer2_cluster_wait(hammer2_cluster_t *cluster);
+int hammer2_cluster_lock(hammer2_cluster_t *cluster, int how);
+void hammer2_cluster_replace(hammer2_cluster_t *dst, hammer2_cluster_t *src);
+void hammer2_cluster_replace_locked(hammer2_cluster_t *dst,
+			hammer2_cluster_t *src);
+hammer2_cluster_t *hammer2_cluster_copy(hammer2_cluster_t *ocluster,
+			int with_chains);
+void hammer2_cluster_unlock(hammer2_cluster_t *cluster);
+void hammer2_cluster_resize(hammer2_trans_t *trans, hammer2_inode_t *ip,
+			hammer2_cluster_t *cparent, hammer2_cluster_t *cluster,
+			int nradix, int flags);
+hammer2_inode_data_t *hammer2_cluster_modify_ip(hammer2_trans_t *trans,
+			hammer2_inode_t *ip, hammer2_cluster_t *cluster,
+			int flags);
+void hammer2_cluster_modify(hammer2_trans_t *trans, hammer2_cluster_t *cluster,
+			int flags);
+void hammer2_cluster_modsync(hammer2_cluster_t *cluster);
+hammer2_cluster_t *hammer2_cluster_lookup_init(hammer2_cluster_t *cparent,
+			int flags);
+void hammer2_cluster_lookup_done(hammer2_cluster_t *cparent);
+hammer2_cluster_t *hammer2_cluster_lookup(hammer2_cluster_t *cparent,
+			hammer2_key_t *key_nextp,
+			hammer2_key_t key_beg, hammer2_key_t key_end,
+			int flags, int *ddflagp);
+hammer2_cluster_t *hammer2_cluster_next(hammer2_cluster_t *cparent,
+			hammer2_cluster_t *cluster,
+			hammer2_key_t *key_nextp,
+			hammer2_key_t key_beg, hammer2_key_t key_end,
+			int flags);
+hammer2_cluster_t *hammer2_cluster_scan(hammer2_cluster_t *cparent,
+			hammer2_cluster_t *cluster, int flags);
+int hammer2_cluster_create(hammer2_trans_t *trans, hammer2_cluster_t *cparent,
+			hammer2_cluster_t **clusterp,
+			hammer2_key_t key, int keybits,
+			int type, size_t bytes, int flags);
+void hammer2_cluster_rename(hammer2_trans_t *trans, hammer2_blockref_t *bref,
+			hammer2_cluster_t *cparent, hammer2_cluster_t *cluster,
+			int flags);
+void hammer2_cluster_delete(hammer2_trans_t *trans, hammer2_cluster_t *pcluster,
+			hammer2_cluster_t *cluster, int flags);
+int hammer2_cluster_snapshot(hammer2_trans_t *trans,
+			hammer2_cluster_t *ocluster, hammer2_ioc_pfs_t *pfs);
+hammer2_cluster_t *hammer2_cluster_parent(hammer2_cluster_t *cluster);
+
 
 #endif /* !_KERNEL */
 #endif /* !_VFS_HAMMER2_HAMMER2_H_ */

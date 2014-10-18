@@ -1,1 +1,0 @@
-#define	NPCKBD	1

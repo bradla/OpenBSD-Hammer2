@@ -37,26 +37,14 @@
 #include <sys/fcntl.h>
 #include <sys/buf.h>
 #include <sys/proc.h>
+#include <sys/namei.h>
 #include <sys/mount.h>
 #include <sys/vnode.h>
+#include <sys/mount.h>
 #include <sys/dirent.h>
 #include <sys/uio.h>
 
 #include "hammer2.h"
-
-void kdmsg_msg_reply(kdmsg_msg_t *, uint32_t);
-
-/*
- * Reply to a message and terminate our side of the transaction.
- *
- * If msg->state is non-NULL we are replying to a one-way message.
- */
-
-void
-kdmsg_msg_reply(kdmsg_msg_t *msg, uint32_t error)
-{
-	printf("error: kdmsg %s %d\n", msg, error);
-}
 
 int
 hammer2_msg_adhoc_input(kdmsg_msg_t *msg)

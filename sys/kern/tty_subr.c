@@ -1,4 +1,4 @@
-/*	$OpenBSD: tty_subr.c,v 1.26 2012/05/24 19:46:27 nicm Exp $	*/
+/*	$OpenBSD: tty_subr.c,v 1.29 2014/07/13 15:52:38 tedu Exp $	*/
 /*	$NetBSD: tty_subr.c,v 1.13 1996/02/09 19:00:43 christos Exp $	*/
 
 /*
@@ -72,12 +72,12 @@ void
 clfree(struct clist *clp)
 {
 	if (clp->c_cs) {
-		bzero(clp->c_cs, clp->c_cn);
-		free(clp->c_cs, M_TTYS);
+		explicit_bzero(clp->c_cs, clp->c_cn);
+		free(clp->c_cs, M_TTYS, 0);
 	}
 	if (clp->c_cq) {
-		bzero(clp->c_cq, QMEM(clp->c_cn));
-		free(clp->c_cq, M_TTYS);
+		explicit_bzero(clp->c_cq, QMEM(clp->c_cn));
+		free(clp->c_cq, M_TTYS, 0);
 	}
 	clp->c_cs = clp->c_cq = NULL;
 }
@@ -132,7 +132,7 @@ q_to_b(struct clist *clp, u_char *cp, int count)
 		if (cc > count)
 			cc = count;
 		bcopy(clp->c_cf, p, cc);
-		bzero(clp->c_cf, cc);
+		memset(clp->c_cf, 0, cc);
 		if (clp->c_cq)
 			clrbits(clp->c_cq, clp->c_cf - clp->c_cs, cc);
 		count -= cc;

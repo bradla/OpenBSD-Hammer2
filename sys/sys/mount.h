@@ -1,4 +1,4 @@
-/*	$OpenBSD: mount.h,v 1.118 2014/03/24 00:19:48 guenther Exp $	*/
+/*	$OpenBSD: mount.h,v 1.121 2014/09/08 01:47:06 guenther Exp $	*/
 /*	$NetBSD: mount.h,v 1.48 1996/02/18 11:55:47 fvdl Exp $	*/
 
 /*
@@ -262,27 +262,12 @@ struct tmpfs_args {
 };
 
 /*
- * Arguments to mount procfs filesystems
- */
-struct procfs_args {
-	int version;
-	int flags;
-};
-
-/*
- * procfs mount options:
- */
-#define PROCFS_ARGSVERSION      1
-#define PROCFSMNT_LINUXCOMPAT   0x01
-
-/*
  * Arguments to mount fusefs filesystems
  */
 struct fusefs_args {
 	char *name;
-	char *url;
 	int fd;
-	int flags;
+	int max_read;
 };
 
 /*
@@ -298,7 +283,6 @@ union mount_info {
 	struct mfs_args mfs_args;
 	struct nfs_args nfs_args;
 	struct iso_args iso_args;
-	struct procfs_args procfs_args;
 	struct msdosfs_args msdosfs_args;
 	struct ntfs_args ntfs_args;
 	struct tmpfs_args tmpfs_args;
@@ -346,13 +330,12 @@ struct statfs {
 #define	MOUNT_NFS	"nfs"		/* Network Filesystem */
 #define	MOUNT_MFS	"mfs"		/* Memory Filesystem */
 #define	MOUNT_MSDOS	"msdos"		/* MSDOS Filesystem */
-#define	MOUNT_PROCFS	"procfs"	/* /proc Filesystem */
 #define	MOUNT_AFS	"afs"		/* Andrew Filesystem */
 #define	MOUNT_CD9660	"cd9660"	/* ISO9660 (aka CDROM) Filesystem */
 #define	MOUNT_EXT2FS	"ext2fs"	/* Second Extended Filesystem */
 #define	MOUNT_NCPFS	"ncpfs"		/* NetWare Network File System */
 #define	MOUNT_NTFS	"ntfs"		/* NTFS */
-#define	MOUNT_HAMMER2	"hammer2"	/* HAMMER2 */
+#define MOUNT_HAMMER2   "hammer2"       /* HAMMER2 */
 #define	MOUNT_UDF	"udf"		/* UDF */
 #define	MOUNT_TMPFS	"tmpfs"		/* tmpfs */
 #define	MOUNT_FUSEFS	"fuse"		/* FUSE */
@@ -376,10 +359,12 @@ struct mount {
 	int		mnt_maxsymlinklen;	/* max size of short symlink */
 	struct statfs	mnt_stat;		/* cache of filesystem stats */
 	void		*mnt_data;		/* private data */
-        int             mnt_kern_flag;          /* kernel only flags */
-	u_int		mnt_iosize_max;
-        struct vfsops  *mnt_vstat;              /* extended stats */
-        int             mnt_nvnodelistsize;     /* # of vnodes on this mount */
+	int		mnt_kern_flag;	/* kernel only flags */
+	struct statvfs	*mnt_vstat;	/* extended stats */
+	u_int		mnt_iosize_max;	/* max IO request size */
+	int	mnt_nvnodelistsize;	/* # of vnodes on this mount */
+	struct vop_ops	*mnt_vn_spec_ops;	/* for use by the VFS */
+	struct vop_ops	*mnt_vn_fifo_ops;	/* for use by the VFS */
 };
 
 /*
@@ -590,8 +575,8 @@ struct netcred {
  * Network export information
  */
 struct netexport {
-	struct	netcred ne_defexported;		      /* Default export */
-	struct	radix_node_head *ne_rtable[AF_MAX+1]; /* Individual exports */
+	struct	netcred ne_defexported;		/* Default export */
+	struct	radix_node_head *ne_rtable_inet;/* Individual exports */
 };
 
 /*

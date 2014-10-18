@@ -73,8 +73,8 @@ struct hammer2_ioc_remote {
 	int			fd;	/* socket descriptor if applicable */
 	int			reserved03;
 	int			reserved04[8];
-	dmsg_vol_data_t		copy1;	/* copy spec */
-	dmsg_vol_data_t		copy2;	/* copy spec (rename ops only) */
+	hammer2_volconf_t	copy1;	/* copy spec */
+	hammer2_volconf_t	copy2;	/* copy spec (rename ops only) */
 };
 
 typedef struct hammer2_ioc_remote hammer2_ioc_remote_t;
@@ -144,5 +144,7 @@ typedef struct hammer2_ioc_inode hammer2_ioc_inode_t;
 /*#define HAMMER2IOC_INODE_COMP_SET	_IOWR('h', 88, struct hammer2_ioc_inode) //set compression mode on inode
 #define HAMMER2IOC_INODE_COMP_REC_SET	_IOWR('h', 89, struct hammer2_ioc_inode)
 #define HAMMER2IOC_INODE_COMP_REC_SET2	_IOWR('h', 90, struct hammer2_ioc_inode)*/
+
+#define HAMMER2IOC_DEBUG_DUMP	_IOWR('h', 91, int)
 
 #endif /* !_VFS_HAMMER2_IOCTL_H_ */

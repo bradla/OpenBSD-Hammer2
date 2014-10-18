@@ -1,4 +1,4 @@
-#	$OpenBSD: files,v 1.572 2014/04/19 12:27:06 henning Exp $
+#	$OpenBSD: files,v 1.578 2014/10/01 10:08:29 mpi Exp $
 #	$NetBSD: files,v 1.87 1996/05/19 17:17:50 jonathan Exp $
 
 #	@(#)files.newconf	7.5 (Berkeley) 5/10/93
@@ -67,7 +67,6 @@ define	systrace
 define	ether
 define	sppp
 define	wlan
-define	bluetooth
 
 # "Chipset" attributes.  These are the machine-independent portions
 # of device drivers.
@@ -547,7 +546,6 @@ pseudo-device msts: tty
 pseudo-device endrun: tty
 
 pseudo-device loop: ifnet
-pseudo-device sl: ifnet
 pseudo-device ppp: ifnet
 pseudo-device tun: ifnet
 pseudo-device bpfilter: ifnet
@@ -694,12 +692,13 @@ file kern/kern_synch.c
 file kern/kern_tc.c
 file kern/kern_time.c
 file kern/kern_timeout.c
+file kern/kern_uuid.c			
+file kern/kern_dmsg.c			
+#file kern/kern_objcache.c			
 file kern/kern_watchdog.c		!small_kernel
 file kern/kern_workq.c
 file kern/kern_task.c
 file kern/kern_xxx.c
-file kern/kern_uuid.c
-file kern/kern_objcache.c
 file kern/kgdb_stub.c			kgdb
 file kern/sched_bsd.c
 file kern/subr_autoconf.c
@@ -717,7 +716,7 @@ file kern/subr_userconf.c		boot_config
 file kern/subr_xxx.c
 file kern/sys_generic.c
 file kern/sys_pipe.c
-file kern/sys_process.c			ptrace | procfs | systrace
+file kern/sys_process.c			ptrace | systrace
 file kern/sys_socket.c
 file kern/syscalls.c			syscall_debug
 file kern/sysv_ipc.c			sysvshm | sysvsem | sysvmsg
@@ -757,31 +756,25 @@ file kern/vfs_getcwd.c
 file kern/spec_vnops.c
 file miscfs/deadfs/dead_vnops.c
 file miscfs/fifofs/fifo_vnops.c		fifo
-file miscfs/procfs/procfs_cmdline.c	procfs
-file miscfs/procfs/procfs_linux.c	procfs
-file miscfs/procfs/procfs_status.c	procfs
-file miscfs/procfs/procfs_subr.c	procfs
-file miscfs/procfs/procfs_vfsops.c	procfs
-file miscfs/procfs/procfs_vnops.c	procfs
 file msdosfs/msdosfs_conv.c		msdosfs
 file msdosfs/msdosfs_denode.c		msdosfs
 file msdosfs/msdosfs_fat.c		msdosfs
 file msdosfs/msdosfs_lookup.c		msdosfs
 file msdosfs/msdosfs_vfsops.c		msdosfs
 file msdosfs/msdosfs_vnops.c		msdosfs
-file hammer2/hammer2_ccms.c		hammer2
-file hammer2/hammer2_chain.c		hammer2
-file hammer2/hammer2_cluster.c		hammer2
-file hammer2/hammer2_flush.c		hammer2
-file hammer2/hammer2_freemap.c		hammer2
-file hammer2/hammer2_inode.c		hammer2
-file hammer2/hammer2_io.c		hammer2
-file hammer2/hammer2_ioctl.c		hammer2
-file hammer2/hammer2_lz4.c		hammer2
-file hammer2/hammer2_msgops.c		hammer2
-file hammer2/hammer2_subr.c		hammer2
-file hammer2/hammer2_vfsops.c		hammer2
-file hammer2/hammer2_vnops.c		hammer2
+file hammer2/hammer2_ccms.c             hammer2
+file hammer2/hammer2_chain.c            hammer2
+file hammer2/hammer2_cluster.c          hammer2
+file hammer2/hammer2_flush.c            hammer2
+file hammer2/hammer2_freemap.c          hammer2
+file hammer2/hammer2_inode.c            hammer2
+file hammer2/hammer2_io.c               hammer2
+file hammer2/hammer2_ioctl.c            hammer2
+file hammer2/hammer2_lz4.c              hammer2
+file hammer2/hammer2_msgops.c           hammer2
+file hammer2/hammer2_subr.c             hammer2
+file hammer2/hammer2_vfsops.c           hammer2
+file hammer2/hammer2_vnops.c            hammer2
 file ntfs/ntfs_compr.c			ntfs
 file ntfs/ntfs_conv.c			ntfs
 file ntfs/ntfs_ihash.c			ntfs
@@ -801,7 +794,6 @@ file net/if_ethersubr.c			ether | inet		needs-flag
 file net/if_spppsubr.c			sppp
 file net/if_loop.c			loop
 file net/if_media.c			ifmedia
-file net/if_sl.c			sl			needs-count
 file net/if_ppp.c			ppp			needs-count
 file net/netisr.c
 file net/ppp_tty.c			ppp
@@ -818,7 +810,7 @@ file net/raw_cb.c
 file net/raw_usrreq.c
 file net/route.c
 file net/rtsock.c
-file net/slcompress.c			sl | ppp
+file net/slcompress.c			ppp
 file net/if_enc.c			enc			needs-count
 file net/if_gre.c			gre			needs-count
 file net/if_trunk.c			trunk			needs-count
@@ -887,7 +879,6 @@ file crypto/ecb_enc.c			(inet & ipsec) | crypto
 file crypto/set_key.c			(inet & ipsec) | crypto
 file crypto/ecb3_enc.c			(inet & ipsec) | crypto
 file crypto/crypto.c			(inet & ipsec) | crypto
-file crypto/cryptodev.c			((inet & ipsec) | crypto)	needs-flag
 file crypto/criov.c			(inet & ipsec) | crypto
 file crypto/cryptosoft.c		(inet & ipsec) | crypto
 file crypto/xform.c			(inet & ipsec) | crypto
@@ -899,25 +890,6 @@ file crypto/hmac.c			wlan | (softraid & crypto)
 file crypto/gmac.c			(inet & ipsec) | crypto
 file crypto/key_wrap.c			wlan
 file crypto/idgen.c			inet6 | nfsclient | nfsserver
-file netbt/bt_input.c			bluetooth		needs-flag
-file netbt/bt_proto.c			bluetooth
-file netbt/hci_event.c			bluetooth
-file netbt/hci_ioctl.c			bluetooth
-file netbt/hci_link.c			bluetooth
-file netbt/hci_misc.c			bluetooth
-file netbt/hci_socket.c			bluetooth
-file netbt/hci_unit.c			bluetooth
-file netbt/l2cap_lower.c		bluetooth
-file netbt/l2cap_misc.c			bluetooth
-file netbt/l2cap_signal.c		bluetooth
-file netbt/l2cap_socket.c		bluetooth
-file netbt/l2cap_upper.c		bluetooth
-file netbt/rfcomm_dlc.c			bluetooth
-file netbt/rfcomm_session.c		bluetooth
-file netbt/rfcomm_socket.c		bluetooth
-file netbt/rfcomm_upper.c		bluetooth
-file netbt/sco_socket.c			bluetooth
-file netbt/sco_upper.c			bluetooth
 file netmpls/mpls_input.c		mpls
 file netmpls/mpls_output.c		mpls
 file netmpls/mpls_proto.c		mpls
@@ -961,6 +933,7 @@ file ufs/ext2fs/ext2fs_alloc.c		ext2fs
 file ufs/ext2fs/ext2fs_balloc.c		ext2fs
 file ufs/ext2fs/ext2fs_bmap.c		ext2fs
 file ufs/ext2fs/ext2fs_bswap.c		ext2fs
+file ufs/ext2fs/ext2fs_extents.c	ext2fs
 file ufs/ext2fs/ext2fs_inode.c		ext2fs
 file ufs/ext2fs/ext2fs_lookup.c		ext2fs
 file ufs/ext2fs/ext2fs_readwrite.c	ext2fs
@@ -1074,9 +1047,10 @@ file lib/libkern/arch/${MACHINE_ARCH}/skpc.S | lib/libkern/skpc.c
 file lib/libkern/arch/${MACHINE_ARCH}/htonl.S | lib/libkern/htonl.c
 file lib/libkern/arch/${MACHINE_ARCH}/htons.S | lib/libkern/htons.c
 file lib/libkern/arch/${MACHINE_ARCH}/strncasecmp.S | lib/libkern/strncasecmp.c
+file lib/libkern/arch/${MACHINE_ARCH}/icrc32.S | lib/libkern/icrc32.c
 
 file lib/libz/adler32.c			ppp_deflate | ipsec | crypto | bios
-file lib/libz/crc32.c			ppp_deflate | ipsec | crypto
+file lib/libz/crc32.c			ppp_deflate | ipsec | crypto | gpt
 file lib/libz/infback.c			ppp_deflate | ipsec | crypto
 file lib/libz/inffast.c			ppp_deflate | ipsec | crypto
 file lib/libz/inflate.c			ppp_deflate | ipsec | crypto

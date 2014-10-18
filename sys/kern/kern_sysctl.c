@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_sysctl.c,v 1.246 2014/03/30 21:54:48 guenther Exp $	*/
+/*	$OpenBSD: kern_sysctl.c,v 1.264 2014/09/15 19:08:21 miod Exp $	*/
 /*	$NetBSD: kern_sysctl.c,v 1.17 1996/05/20 17:49:05 mrg Exp $	*/
 
 /*-
@@ -43,6 +43,7 @@
 #include <sys/systm.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
+#include <sys/pool.h>
 #include <sys/proc.h>
 #include <sys/resourcevar.h>
 #include <sys/signalvar.h>
@@ -55,10 +56,8 @@
 #include <sys/tty.h>
 #include <sys/disklabel.h>
 #include <sys/disk.h>
-#include <uvm/uvm_extern.h>
 #include <sys/sysctl.h>
 #include <sys/msgbuf.h>
-#include <sys/dkstat.h>
 #include <sys/vmmeter.h>
 #include <sys/namei.h>
 #include <sys/exec.h>
@@ -74,7 +73,7 @@
 #include <sys/evcount.h>
 #include <sys/un.h>
 #include <sys/unpcb.h>
-
+#include <sys/sched.h>
 #include <sys/mount.h>
 #include <sys/syscallargs.h>
 
@@ -84,7 +83,6 @@
 
 #include <net/route.h>
 #include <netinet/in.h>
-#include <netinet/in_systm.h>
 #include <netinet/ip.h>
 #include <netinet/in_pcb.h>
 #include <netinet/ip6.h>
@@ -110,21 +108,23 @@ extern int nselcoll, fscale;
 extern struct disklist_head disklist;
 extern fixpt_t ccpu;
 extern  long numvnodes;
-extern u_int mcllivelocks;
+extern u_int net_livelocks;
 
 extern void nmbclust_update(void);
 
 int sysctl_diskinit(int, struct proc *);
 int sysctl_proc_args(int *, u_int, void *, size_t *, struct proc *);
 int sysctl_proc_cwd(int *, u_int, void *, size_t *, struct proc *);
+int sysctl_proc_nobroadcastkill(int *, u_int, void *, size_t, void *, size_t *,
+	struct proc *);
 int sysctl_intrcnt(int *, u_int, void *, size_t *);
 int sysctl_sensors(int *, u_int, void *, size_t *, void *, size_t);
 int sysctl_emul(int *, u_int, void *, size_t *, void *, size_t);
 int sysctl_cptime2(int *, u_int, void *, size_t *, void *, size_t);
 
 void fill_file(struct kinfo_file *, struct file *, struct filedesc *,
-    int, struct vnode *, struct proc *, struct proc *, int);
-void fill_kproc(struct proc *, struct kinfo_proc *, int, int);
+    int, struct vnode *, struct process *, struct proc *, int);
+void fill_kproc(struct process *, struct kinfo_proc *, struct proc *, int);
 
 int (*cpu_cpuspeed)(int *);
 void (*cpu_setperf)(int);
@@ -265,13 +265,7 @@ kern_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 	dev_t dev;
 	extern int somaxconn, sominconn;
 	extern int usermount, nosuidcoredump;
-	extern long cp_time[CPUSTATES];
 	extern int stackgap_random;
-#ifdef CRYPTO
-	extern int usercrypto;
-	extern int userasymcrypto;
-	extern int cryptodevallowsoft;
-#endif
 	extern int maxlocksperuid;
 	extern int pool_debug;
 
@@ -285,6 +279,7 @@ kern_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		case KERN_POOL:
 		case KERN_PROC_ARGS:
 		case KERN_PROC_CWD:
+		case KERN_PROC_NOBROADCASTKILL:
 		case KERN_SYSVIPC_INFO:
 		case KERN_SEMINFO:
 		case KERN_SHMINFO:
@@ -334,7 +329,7 @@ kern_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		    newp == NULL)
 			return (error);
 		if ((securelevel > 0 || level < -1) &&
-		    level < securelevel && p->p_pid != 1)
+		    level < securelevel && p->p_p->ps_pid != 1)
 			return (EPERM);
 		securelevel = level;
 		return (0);
@@ -373,6 +368,9 @@ kern_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 	case KERN_PROC_CWD:
 		return (sysctl_proc_cwd(name + 1, namelen - 1, oldp, oldlenp,
 		     p));
+	case KERN_PROC_NOBROADCASTKILL:
+		return (sysctl_proc_nobroadcastkill(name + 1, namelen - 1,
+		     newp, newlen, oldp, oldlenp, p));
 	case KERN_FILE:
 		return (sysctl_file(name + 1, namelen - 1, oldp, oldlenp, p));
 #endif
@@ -410,14 +408,15 @@ kern_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		return (sysctl_rdstruct(oldp, oldlenp, newp, &rndstats,
 		    sizeof(rndstats)));
 	case KERN_ARND: {
-		char buf[256];
+		char buf[512];
 
 		if (*oldlenp > sizeof(buf))
-			*oldlenp = sizeof(buf);
+			return (EINVAL);
 		if (oldp) {
 			arc4random_buf(buf, *oldlenp);
 			if ((error = copyout(buf, oldp, *oldlenp)))
 				return (error);
+			explicit_bzero(buf, sizeof(buf));
 		}
 		return (0);
 	}
@@ -464,6 +463,7 @@ kern_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 	{
 		CPU_INFO_ITERATOR cii;
 		struct cpu_info *ci;
+		long cp_time[CPUSTATES];
 		int i;
 
 		memset(cp_time, 0, sizeof(cp_time));
@@ -512,16 +512,6 @@ kern_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 #if defined(SYSVMSG) || defined(SYSVSEM) || defined(SYSVSHM)
 	case KERN_SYSVIPC_INFO:
 		return (sysctl_sysvipc(name + 1, namelen - 1, oldp, oldlenp));
-#endif
-#ifdef CRYPTO
-	case KERN_USERCRYPTO:
-		return (sysctl_int(oldp, oldlenp, newp, newlen, &usercrypto));
-	case KERN_USERASYMCRYPTO:
-		return (sysctl_int(oldp, oldlenp, newp, newlen,
-			    &userasymcrypto));
-	case KERN_CRYPTODEVALLOWSOFT:
-		return (sysctl_int(oldp, oldlenp, newp, newlen,
-			    &cryptodevallowsoft));
 #endif
 	case KERN_SPLASSERT:
 		return (sysctl_int(oldp, oldlenp, newp, newlen,
@@ -591,7 +581,7 @@ kern_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 			dev = NODEV;
 		return sysctl_rdstruct(oldp, oldlenp, newp, &dev, sizeof(dev));
 	case KERN_NETLIVELOCKS:
-		return (sysctl_rdint(oldp, oldlenp, newp, mcllivelocks));
+		return (sysctl_rdint(oldp, oldlenp, newp, net_livelocks));
 	case KERN_POOL_DEBUG: {
 		int old_pool_debug = pool_debug;
 
@@ -753,6 +743,8 @@ debug_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 	/* all sysctl names at this level are name and field */
 	if (namelen != 2)
 		return (ENOTDIR);		/* overloaded */
+	if (name[0] < 0 || name[0] >= nitems(debugvars))
+		return (EOPNOTSUPP);
 	cdp = debugvars[name[0]];
 	if (cdp->debugname == 0)
 		return (EOPNOTSUPP);
@@ -995,7 +987,7 @@ sysctl_rdstruct(void *oldp, size_t *oldlenp, void *newp, const void *sp,
 #ifndef SMALL_KERNEL
 void
 fill_file(struct kinfo_file *kf, struct file *fp, struct filedesc *fdp,
-	  int fd, struct vnode *vp, struct proc *pp, struct proc *p,
+	  int fd, struct vnode *vp, struct process *pr, struct proc *p,
 	  int show_pointers)
 {
 	struct vattr va;
@@ -1166,12 +1158,13 @@ fill_file(struct kinfo_file *kf, struct file *fp, struct filedesc *fdp,
 	}
 
 	/* per-process information for KERN_FILE_BY[PU]ID */
-	if (pp != NULL) {
-		kf->p_pid = pp->p_p->ps_pid;
-		kf->p_uid = pp->p_ucred->cr_uid;
-		kf->p_gid = pp->p_ucred->cr_gid;
-		kf->p_tid = pp->p_pid + THREAD_PID_OFFSET;
-		strlcpy(kf->p_comm, pp->p_comm, sizeof(kf->p_comm));
+	if (pr != NULL) {
+		kf->p_pid = pr->ps_pid;
+		kf->p_uid = pr->ps_ucred->cr_uid;
+		kf->p_gid = pr->ps_ucred->cr_gid;
+		kf->p_tid = -1;
+		strlcpy(kf->p_comm, pr->ps_mainproc->p_comm,
+		    sizeof(kf->p_comm));
 	}
 	if (fdp != NULL)
 		kf->fd_ofileflags = fdp->fd_ofileflags[fd];
@@ -1187,7 +1180,6 @@ sysctl_file(int *name, u_int namelen, char *where, size_t *sizep,
 	struct kinfo_file *kf;
 	struct filedesc *fdp;
 	struct file *fp;
-	struct proc *pp;
 	struct process *pr;
 	size_t buflen, elem_size, elem_count, outsize;
 	char *dp = where;
@@ -1214,9 +1206,9 @@ sysctl_file(int *name, u_int namelen, char *where, size_t *sizep,
 
 	kf = malloc(sizeof(*kf), M_TEMP, M_WAITOK);
 
-#define FILLIT(fp, fdp, i, vp, pp) do {				\
+#define FILLIT(fp, fdp, i, vp, pr) do {				\
 	if (buflen >= elem_size && elem_count > 0) {		\
-		fill_file(kf, fp, fdp, i, vp, pp, p, show_pointers);	\
+		fill_file(kf, fp, fdp, i, vp, pr, p, show_pointers);	\
 		error = copyout(kf, dp, outsize);		\
 		if (error)					\
 			break;					\
@@ -1251,59 +1243,55 @@ sysctl_file(int *name, u_int namelen, char *where, size_t *sizep,
 			 * skip system, exiting, embryonic and undead
 			 * processes
 			 */
-			pp = pr->ps_mainproc;
-			if ((pp->p_flag & P_SYSTEM) || (pr->ps_flags & PS_EXITING)
-			    || pp->p_stat == SIDL || pp->p_stat == SZOMB)
+			if (pr->ps_flags & (PS_SYSTEM | PS_EMBRYO | PS_EXITING))
 				continue;
-			if (arg > 0 && pp->p_pid != (pid_t)arg) {
+			if (arg > 0 && pr->ps_pid != (pid_t)arg) {
 				/* not the pid we are looking for */
 				continue;
 			}
-			fdp = pp->p_fd;
+			fdp = pr->ps_fd;
 			if (pr->ps_textvp)
-				FILLIT(NULL, NULL, KERN_FILE_TEXT, pr->ps_textvp, pp);
+				FILLIT(NULL, NULL, KERN_FILE_TEXT, pr->ps_textvp, pr);
 			if (fdp->fd_cdir)
-				FILLIT(NULL, NULL, KERN_FILE_CDIR, fdp->fd_cdir, pp);
+				FILLIT(NULL, NULL, KERN_FILE_CDIR, fdp->fd_cdir, pr);
 			if (fdp->fd_rdir)
-				FILLIT(NULL, NULL, KERN_FILE_RDIR, fdp->fd_rdir, pp);
+				FILLIT(NULL, NULL, KERN_FILE_RDIR, fdp->fd_rdir, pr);
 			if (pr->ps_tracevp)
-				FILLIT(NULL, NULL, KERN_FILE_TRACE, pr->ps_tracevp, pp);
+				FILLIT(NULL, NULL, KERN_FILE_TRACE, pr->ps_tracevp, pr);
 			for (i = 0; i < fdp->fd_nfiles; i++) {
 				if ((fp = fdp->fd_ofiles[i]) == NULL)
 					continue;
 				if (!FILE_IS_USABLE(fp))
 					continue;
-				FILLIT(fp, fdp, i, NULL, pp);
+				FILLIT(fp, fdp, i, NULL, pr);
 			}
 		}
 		break;
 	case KERN_FILE_BYUID:
 		LIST_FOREACH(pr, &allprocess, ps_list) {
-			pp = pr->ps_mainproc;
 			/*
 			 * skip system, exiting, embryonic and undead
 			 * processes
 			 */
-			if ((pp->p_flag & P_SYSTEM) || (pr->ps_flags & PS_EXITING)
-			    || pp->p_stat == SIDL || pp->p_stat == SZOMB)
+			if (pr->ps_flags & (PS_SYSTEM | PS_EMBRYO | PS_EXITING))
 				continue;
-			if (arg >= 0 && pp->p_ucred->cr_uid != (uid_t)arg) {
+			if (arg >= 0 && pr->ps_ucred->cr_uid != (uid_t)arg) {
 				/* not the uid we are looking for */
 				continue;
 			}
-			fdp = pp->p_fd;
+			fdp = pr->ps_fd;
 			if (fdp->fd_cdir)
-				FILLIT(NULL, NULL, KERN_FILE_CDIR, fdp->fd_cdir, pp);
+				FILLIT(NULL, NULL, KERN_FILE_CDIR, fdp->fd_cdir, pr);
 			if (fdp->fd_rdir)
-				FILLIT(NULL, NULL, KERN_FILE_RDIR, fdp->fd_rdir, pp);
+				FILLIT(NULL, NULL, KERN_FILE_RDIR, fdp->fd_rdir, pr);
 			if (pr->ps_tracevp)
-				FILLIT(NULL, NULL, KERN_FILE_TRACE, pr->ps_tracevp, pp);
+				FILLIT(NULL, NULL, KERN_FILE_TRACE, pr->ps_tracevp, pr);
 			for (i = 0; i < fdp->fd_nfiles; i++) {
 				if ((fp = fdp->fd_ofiles[i]) == NULL)
 					continue;
 				if (!FILE_IS_USABLE(fp))
 					continue;
-				FILLIT(fp, fdp, i, NULL, pp);
+				FILLIT(fp, fdp, i, NULL, pr);
 			}
 		}
 		break;
@@ -1311,7 +1299,7 @@ sysctl_file(int *name, u_int namelen, char *where, size_t *sizep,
 		error = EINVAL;
 		break;
 	}
-	free(kf, M_TEMP);
+	free(kf, M_TEMP, 0);
 
 	if (!error) {
 		if (where == NULL)
@@ -1333,7 +1321,7 @@ int
 sysctl_doproc(int *name, u_int namelen, char *where, size_t *sizep)
 {
 	struct kinfo_proc *kproc = NULL;
-	struct proc *p, *pp;
+	struct proc *p;
 	struct process *pr;
 	char *dp;
 	int arg, buflen, doingzomb, elem_size, elem_count;
@@ -1369,12 +1357,10 @@ again:
 		if (pr->ps_pgrp == NULL)
 			continue;
 
-		p = pr->ps_mainproc;
-
 		/*
 		 * Skip embryonic processes.
 		 */
-		if (p->p_stat == SIDL)
+		if (pr->ps_flags & PS_EMBRYO)
 			continue;
 
 		/*
@@ -1384,7 +1370,7 @@ again:
 
 		case KERN_PROC_PID:
 			/* could do this with just a lookup */
-			if (p->p_pid != (pid_t)arg)
+			if (pr->ps_pid != (pid_t)arg)
 				continue;
 			break;
 
@@ -1418,7 +1404,7 @@ again:
 			break;
 
 		case KERN_PROC_ALL:
-			if (p->p_flag & P_SYSTEM)
+			if (pr->ps_flags & PS_SYSTEM)
 				continue;
 			break;
 
@@ -1432,16 +1418,7 @@ again:
 		}
 
 		if (buflen >= elem_size && elem_count > 0) {
-			fill_kproc(p, kproc, 0, show_pointers);
-			/* Update %cpu for all threads */
-			if (!dothreads) {
-				TAILQ_FOREACH(pp, &pr->ps_threads,
-				    p_thr_link) {
-					if (pp == p)
-						continue;
-					kproc->p_pctcpu += pp->p_pctcpu;
-				}
-			}
+			fill_kproc(pr, kproc, NULL, show_pointers);
 			error = copyout(kproc, dp, elem_size);
 			if (error)
 				goto err;
@@ -1457,7 +1434,7 @@ again:
 
 		TAILQ_FOREACH(p, &pr->ps_threads, p_thr_link) {
 			if (buflen >= elem_size && elem_count > 0) {
-				fill_kproc(p, kproc, 1, show_pointers);
+				fill_kproc(pr, kproc, p, show_pointers);
 				error = copyout(kproc, dp, elem_size);
 				if (error)
 					goto err;
@@ -1485,7 +1462,7 @@ again:
 	}
 err:
 	if (kproc)
-		free(kproc, M_TEMP);
+		free(kproc, M_TEMP, 0);
 	return (error);
 }
 
@@ -1493,16 +1470,20 @@ err:
  * Fill in a kproc structure for the specified process.
  */
 void
-fill_kproc(struct proc *p, struct kinfo_proc *ki, int isthread,
+fill_kproc(struct process *pr, struct kinfo_proc *ki, struct proc *p,
     int show_pointers)
 {
-	struct process *pr = p->p_p;
 	struct session *s = pr->ps_session;
 	struct tty *tp;
 	struct timespec ut, st;
+	int isthread;
+
+	isthread = p != NULL;
+	if (!isthread)
+		p = pr->ps_mainproc;		/* XXX */
 
 	FILL_KPROC(ki, strlcpy, p, pr, pr->ps_ucred, pr->ps_pgrp,
-	    p, pr, s, p->p_vmspace, pr->ps_limit, pr->ps_sigacts, isthread,
+	    p, pr, s, pr->ps_vmspace, pr->ps_limit, pr->ps_sigacts, isthread,
 	    show_pointers);
 
 	/* stuff that's too painful to generalize into the macros */
@@ -1523,20 +1504,40 @@ fill_kproc(struct proc *p, struct kinfo_proc *ki, int isthread,
 	}
 
 	/* fixups that can only be done in the kernel */
-	if (!P_ZOMBIE(p)) {
-		if (p->p_stat != SIDL)
-			ki->p_vm_rssize = vm_resident_count(p->p_vmspace);
-
-		calctsru(&p->p_tu, &ut, &st, NULL);
+	if ((pr->ps_flags & PS_ZOMBIE) == 0) {
+		if ((pr->ps_flags & PS_EMBRYO) == 0)
+			ki->p_vm_rssize = vm_resident_count(pr->ps_vmspace);
+		calctsru(isthread ? &p->p_tu : &pr->ps_tu, &ut, &st, NULL);
 		ki->p_uutime_sec = ut.tv_sec;
 		ki->p_uutime_usec = ut.tv_nsec/1000;
 		ki->p_ustime_sec = st.tv_sec;
 		ki->p_ustime_usec = st.tv_nsec/1000;
 
 #ifdef MULTIPROCESSOR
-		if (p->p_cpu != NULL)
+		if (isthread && p->p_cpu != NULL)
 			ki->p_cpuid = CPU_INFO_UNIT(p->p_cpu);
 #endif
+	}
+
+	/* get %cpu and schedule state: just one thread or sum of all? */
+	if (isthread) {
+		ki->p_pctcpu = p->p_pctcpu;
+		ki->p_stat   = p->p_stat;
+	} else {
+		ki->p_pctcpu = 0;
+		ki->p_stat = (pr->ps_flags & PS_ZOMBIE) ? SDEAD : SIDL;
+		TAILQ_FOREACH(p, &pr->ps_threads, p_thr_link) {
+			ki->p_pctcpu += p->p_pctcpu;
+			/* find best state: ONPROC > RUN > STOP > SLEEP > .. */
+			if (p->p_stat == SONPROC || ki->p_stat == SONPROC)
+				ki->p_stat = SONPROC;
+			else if (p->p_stat == SRUN || ki->p_stat == SRUN)
+				ki->p_stat = SRUN;
+			else if (p->p_stat == SSTOP || ki->p_stat == SSTOP)
+				ki->p_stat = SSTOP;
+			else if (p->p_stat == SSLEEP)
+				ki->p_stat = SSLEEP;
+		}
 	}
 }
 
@@ -1544,7 +1545,7 @@ int
 sysctl_proc_args(int *name, u_int namelen, void *oldp, size_t *oldlenp,
     struct proc *cp)
 {
-	struct proc *vp;
+	struct process *vpr;
 	pid_t pid;
 	struct ps_strings pss;
 	struct iovec iov;
@@ -1573,7 +1574,7 @@ sysctl_proc_args(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 		return (EOPNOTSUPP);
 	}
 
-	if ((vp = pfind(pid)) == NULL)
+	if ((vpr = prfind(pid)) == NULL)
 		return (ESRCH);
 
 	if (oldp == NULL) {
@@ -1584,26 +1585,23 @@ sysctl_proc_args(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 		return (0);
 	}
 
-	if (P_ZOMBIE(vp) || (vp->p_flag & P_SYSTEM))
+	/* Either system process or exiting/zombie */
+	if (vpr->ps_flags & (PS_SYSTEM | PS_EXITING))
 		return (EINVAL);
 
-	/* Exiting - don't bother, it will be gone soon anyway */
-	if (vp->p_p->ps_flags & PS_EXITING)
-		return (ESRCH);
-
 	/* Execing - danger. */
-	if ((vp->p_p->ps_flags & PS_INEXEC))
+	if ((vpr->ps_flags & PS_INEXEC))
 		return (EBUSY);
 	
 	/* Only owner or root can get env */
 	if ((op == KERN_PROC_NENV || op == KERN_PROC_ENV) &&
-	    (vp->p_ucred->cr_uid != cp->p_ucred->cr_uid &&
+	    (vpr->ps_ucred->cr_uid != cp->p_ucred->cr_uid &&
 	    (error = suser(cp, 0)) != 0))
 		return (error);
 
-	vm = vp->p_vmspace;
+	vm = vpr->ps_vmspace;
 	vm->vm_refcnt++;
-	vp = NULL;
+	vpr = NULL;
 
 	buf = malloc(PAGE_SIZE, M_TEMP, M_WAITOK);
 
@@ -1745,7 +1743,7 @@ more:
 
 out:
 	uvmspace_free(vm);
-	free(buf, M_TEMP);
+	free(buf, M_TEMP, 0);
 	return (error);
 }
 
@@ -1753,7 +1751,7 @@ int
 sysctl_proc_cwd(int *name, u_int namelen, void *oldp, size_t *oldlenp,
     struct proc *cp)
 {
-	struct proc *findp;
+	struct process *findpr;
 	struct vnode *vp;
 	pid_t pid;
 	int error;
@@ -1766,7 +1764,7 @@ sysctl_proc_cwd(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 		return (EINVAL);
 
 	pid = name[0];
-	if ((findp = pfind(pid)) == NULL)
+	if ((findpr = prfind(pid)) == NULL)
 		return (ESRCH);
 
 	if (oldp == NULL) {
@@ -1774,17 +1772,14 @@ sysctl_proc_cwd(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 		return (0);
 	}
 
-	if (P_ZOMBIE(findp) || (findp->p_flag & P_SYSTEM))
+	/* Either system process or exiting/zombie */
+	if (findpr->ps_flags & (PS_SYSTEM | PS_EXITING))
 		return (EINVAL);
 
 	/* Only owner or root can get cwd */
-	if (findp->p_ucred->cr_uid != cp->p_ucred->cr_uid &&
+	if (findpr->ps_ucred->cr_uid != cp->p_ucred->cr_uid &&
 	    (error = suser(cp, 0)) != 0)
 		return (error);
-
-	/* Exiting - don't bother, it will be gone soon anyway */
-	if (findp->p_p->ps_flags & PS_EXITING)
-		return (ESRCH);
 
 	len = *oldlenp;
 	if (len > MAXPATHLEN * 4)
@@ -1794,7 +1789,7 @@ sysctl_proc_cwd(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 	*oldlenp = 0;
 
 	/* snag a reference to the vnode before we can sleep */
-	vp = findp->p_fd->fd_cdir;
+	vp = findpr->ps_fd->fd_cdir;
 	vref(vp);
 
 	path = malloc(len, M_TEMP, M_WAITOK);
@@ -1812,7 +1807,48 @@ sysctl_proc_cwd(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 	}
 
 	vrele(vp);
-	free(path, M_TEMP);
+	free(path, M_TEMP, 0);
+
+	return (error);
+}
+
+int
+sysctl_proc_nobroadcastkill(int *name, u_int namelen, void *newp, size_t newlen,
+    void *oldp, size_t *oldlenp, struct proc *cp)
+{
+	struct process *findpr;
+	pid_t pid;
+	int error, flag;
+
+	if (namelen > 1)
+		return (ENOTDIR);
+	if (namelen < 1)
+		return (EINVAL);
+
+	pid = name[0];
+	if ((findpr = prfind(pid)) == NULL)
+		return (ESRCH);
+
+	/* Either system process or exiting/zombie */
+	if (findpr->ps_flags & (PS_SYSTEM | PS_EXITING))
+		return (EINVAL);
+
+	/* Only root can change PS_NOBROADCASTKILL */
+	if (newp != 0 && (error = suser(cp, 0)) != 0)
+		return (error);
+
+	/* get the PS_NOBROADCASTKILL flag */
+	flag = findpr->ps_flags & PS_NOBROADCASTKILL ? 1 : 0;
+
+	error = sysctl_int(oldp, oldlenp, newp, newlen, &flag);
+	if (error == 0 && newp) {
+		if (flag)
+			atomic_setbits_int(&findpr->ps_flags,
+			    PS_NOBROADCASTKILL);
+		else
+			atomic_clearbits_int(&findpr->ps_flags,
+			    PS_NOBROADCASTKILL);
+	}
 
 	return (error);
 }
@@ -1845,12 +1881,12 @@ sysctl_diskinit(int update, struct proc *p)
 		tlen++;
 
 		if (disknames)
-			free(disknames, M_SYSCTL);
+			free(disknames, M_SYSCTL, 0);
 		if (diskstats)
-			free(diskstats, M_SYSCTL);
+			free(diskstats, M_SYSCTL, 0);
 		diskstats = NULL;
 		disknames = NULL;
-		diskstats = malloc(disk_count * sizeof(struct diskstats),
+		diskstats = mallocarray(disk_count, sizeof(struct diskstats),
 		    M_SYSCTL, M_WAITOK);
 		disknames = malloc(tlen, M_SYSCTL, M_WAITOK);
 		disknames[0] = '\0';
@@ -2025,7 +2061,7 @@ sysctl_sysvipc(int *name, u_int namelen, void *where, size_t *sizep)
 	}
 	*sizep -= buflen;
 	error = copyout(buf, where, *sizep);
-	free(buf, M_TEMP);
+	free(buf, M_TEMP, 0);
 	/* If copyout succeeded, use return code set earlier. */
 	return (error ? error : ret);
 }
@@ -2070,7 +2106,7 @@ sysctl_sensors(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 		ret = sysctl_rdstruct(oldp, oldlenp, newp, usd,
 		    sizeof(struct sensordev));
 
-		free(usd, M_TEMP);
+		free(usd, M_TEMP, 0);
 		return (ret);
 	}
 
@@ -2093,7 +2129,7 @@ sysctl_sensors(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 
 	ret = sysctl_rdstruct(oldp, oldlenp, newp, us,
 	    sizeof(struct sensor));
-	free(us, M_TEMP);
+	free(us, M_TEMP, 0);
 	return (ret);
 }
 

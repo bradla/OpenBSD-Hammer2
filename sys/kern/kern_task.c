@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_task.c,v 1.8 2013/12/11 22:39:49 kettenis Exp $ */
+/*	$OpenBSD: kern_task.c,v 1.10 2014/07/12 18:43:32 tedu Exp $ */
 
 /*
  * Copyright (c) 2013 David Gwynne <dlg@openbsd.org>
@@ -50,7 +50,18 @@ struct taskq taskq_sys = {
 	TAILQ_HEAD_INITIALIZER(taskq_sys.tq_worklist)
 };
 
+struct taskq taskq_sys_mp = {
+	TQ_S_CREATED,
+	0,
+	1,
+	1,
+	"systqmp",
+	MUTEX_INITIALIZER(IPL_HIGH),
+	TAILQ_HEAD_INITIALIZER(taskq_sys_mp.tq_worklist)
+};
+
 struct taskq *const systq = &taskq_sys;
+struct taskq *const systqmp = &taskq_sys_mp;
 
 void	taskq_init(void); /* called in init_main.c */
 void	taskq_create_thread(void *);
@@ -61,6 +72,7 @@ void
 taskq_init(void)
 {
 	kthread_create_deferred(taskq_create_thread, systq);
+	kthread_create_deferred(taskq_create_thread, systqmp);
 }
 
 struct taskq *
@@ -117,7 +129,7 @@ taskq_destroy(struct taskq *tq)
 	}
 	mtx_leave(&tq->tq_mtx);
 
-	free(tq, M_DEVBUF);
+	free(tq, M_DEVBUF, 0);
 }
 
 void
@@ -131,7 +143,7 @@ taskq_create_thread(void *arg)
 	switch (tq->tq_state) {
 	case TQ_S_DESTROYED:
 		mtx_leave(&tq->tq_mtx);
-		free(tq, M_DEVBUF);
+		free(tq, M_DEVBUF, 0);
 		return;
 
 	case TQ_S_CREATED:

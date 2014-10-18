@@ -66,7 +66,6 @@ enum uio_seg {
 
 #ifdef _KERNEL
 struct uio {
-        struct  process *uio_td;
 	struct	iovec *uio_iov;	/* pointer to array of iovecs */
 	int	uio_iovcnt;	/* number of iovecs in array */
 	off_t	uio_offset;	/* offset into file this uio corresponds to */

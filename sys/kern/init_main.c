@@ -1,4 +1,4 @@
-/*	$OpenBSD: init_main.c,v 1.211 2014/04/18 11:51:17 guenther Exp $	*/
+/*	$OpenBSD: init_main.c,v 1.217 2014/08/14 09:01:47 mpi Exp $	*/
 /*	$NetBSD: init_main.c,v 1.84.4.1 1996/06/02 09:08:06 mrg Exp $	*/
 
 /*
@@ -84,11 +84,7 @@
 
 #include <ufs/ufs/quota.h>
 
-
-#include <uvm/uvm_extern.h>
-
 #include <net/if.h>
-#include <net/raw_cb.h>
 #include <net/netisr.h>
 
 #if defined(CRYPTO)
@@ -117,7 +113,7 @@ struct	process process0;
 struct	plimit limit0;
 struct	vmspace vmspace0;
 struct	sigacts sigacts0;
-struct	proc *initproc;
+struct	process *initprocess;
 struct	proc *reaperproc;
 
 int	cmask = CMASK;
@@ -266,6 +262,7 @@ main(void *framep)
 	process0.ps_refcnt = 1;
 	p->p_p = pr = &process0;
 	LIST_INSERT_HEAD(&allprocess, pr, ps_list);
+	atomic_setbits_int(&pr->ps_flags, PS_SYSTEM);
 
 	/* Set the default routing table/domain. */
 	process0.ps_rtableid = 0;
@@ -304,7 +301,7 @@ main(void *framep)
 	siginit(pr);
 
 	/* Create the file descriptor table. */
-	p->p_fd = fdinit(NULL);
+	p->p_fd = pr->ps_fd = fdinit();
 
 	/* Create the limits structures. */
 	pr->ps_limit = &limit0;
@@ -324,7 +321,7 @@ main(void *framep)
 	/* Allocate a prototype map so we have something to fork. */
 	uvmspace_init(&vmspace0, pmap_kernel(), round_page(VM_MIN_ADDRESS),
 	    trunc_page(VM_MAX_ADDRESS), TRUE, TRUE);
-	p->p_vmspace = &vmspace0;
+	p->p_vmspace = pr->ps_vmspace = &vmspace0;
 
 	p->p_addr = proc0paddr;				/* XXX */
 
@@ -433,15 +430,20 @@ main(void *framep)
 	 * wait for us to inform it that the root file system has been
 	 * mounted.
 	 */
-	if (fork1(p, FORK_FORK, NULL, 0, start_init, NULL, NULL,
-	    &initproc))
-		panic("fork init");
+	{
+		struct proc *initproc;
+
+		if (fork1(p, FORK_FORK, NULL, 0, start_init, NULL, NULL,
+		    &initproc))
+			panic("fork init");
+		initprocess = initproc->p_p;
+	}
 
 	randompid = 1;
 
 	/*
 	 * Create any kernel threads whose creation was deferred because
-	 * initproc had not yet been created.
+	 * initprocess had not yet been created.
 	 */
 	kthread_run_deferred_queue();
 
@@ -480,13 +482,13 @@ main(void *framep)
 	p->p_fd->fd_rdir = NULL;
 
 	/*
-	 * Now that root is mounted, we can fixup initproc's CWD
+	 * Now that root is mounted, we can fixup initprocess's CWD
 	 * info.  All other processes are kthreads, which merely
 	 * share proc0's CWD info.
 	 */
-	initproc->p_fd->fd_cdir = rootvnode;
-	vref(initproc->p_fd->fd_cdir);
-	initproc->p_fd->fd_rdir = NULL;
+	initprocess->ps_fd->fd_cdir = rootvnode;
+	vref(initprocess->ps_fd->fd_cdir);
+	initprocess->ps_fd->fd_rdir = NULL;
 
 	/*
 	 * Now can look at time, having had a chance to verify the time
@@ -653,7 +655,7 @@ start_init(void *arg)
 			*flagsp++ = '\0';
 			i = flagsp - flags;
 #ifdef DEBUG
-			printf("init: copying out flags `%s' %d\n", flags, i);
+			printf("init: copying out flags `%s' %ld\n", flags, i);
 #endif
 #ifdef MACHINE_STACK_GROWS_UP
 			arg1 = ucp;
@@ -670,7 +672,7 @@ start_init(void *arg)
 		 */
 		i = strlen(path) + 1;
 #ifdef DEBUG
-		printf("init: copying out path `%s' %d\n", path, i);
+		printf("init: copying out path `%s' %ld\n", path, i);
 #endif
 #ifdef MACHINE_STACK_GROWS_UP
 		arg0 = ucp;

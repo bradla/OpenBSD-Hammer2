@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_ktrace.c,v 1.65 2014/03/30 21:54:48 guenther Exp $	*/
+/*	$OpenBSD: kern_ktrace.c,v 1.69 2014/07/13 15:46:21 uebayasi Exp $	*/
 /*	$NetBSD: kern_ktrace.c,v 1.23 1996/02/09 18:59:36 christos Exp $	*/
 
 /*
@@ -47,8 +47,6 @@
 #include <sys/mount.h>
 #include <sys/syscall.h>
 #include <sys/syscallargs.h>
-
-#include <uvm/uvm_extern.h>
 
 void	ktrinitheaderraw(struct ktr_header *, uint, pid_t, pid_t);
 void	ktrinitheader(struct ktr_header *, struct proc *, int);
@@ -177,7 +175,7 @@ ktrsyscall(struct proc *p, register_t code, size_t argsize, register_t args[])
 		memset(argp, 0, nargs * sizeof(int));
 	kth.ktr_len = len;
 	ktrwrite(p, &kth, ktp);
-	free(ktp, M_TEMP);
+	free(ktp, M_TEMP, len);
 	atomic_clearbits_int(&p->p_flag, P_INKTR);
 }
 
@@ -240,7 +238,7 @@ ktrgenio(struct proc *p, int fd, enum uio_rw rw, struct iovec *iov,
 	struct ktr_genio *ktp;
 	caddr_t cp;
 	int count;
-	int buflen;
+	int mlen, buflen;
 
 	atomic_setbits_int(&p->p_flag, P_INKTR);
 
@@ -251,7 +249,8 @@ ktrgenio(struct proc *p, int fd, enum uio_rw rw, struct iovec *iov,
 		buflen = len + sizeof(struct ktr_genio);
 
 	ktrinitheader(&kth, p, KTR_GENIO);
-	ktp = malloc(buflen, M_TEMP, M_WAITOK);
+	mlen = buflen;
+	ktp = malloc(mlen, M_TEMP, M_WAITOK);
 	ktp->ktr_fd = fd;
 	ktp->ktr_rw = rw;
 
@@ -286,7 +285,7 @@ ktrgenio(struct proc *p, int fd, enum uio_rw rw, struct iovec *iov,
 		len -= count;
 	}
 
-	free(ktp, M_TEMP);
+	free(ktp, M_TEMP, mlen);
 	atomic_clearbits_int(&p->p_flag, P_INKTR);
 }
 
@@ -333,9 +332,7 @@ ktrstruct(struct proc *p, const char *name, const void *data, size_t datalen)
 	void *buf;
 	size_t buflen;
 
-#ifdef MULTIPROCESSOR
-	KASSERT(__mp_lock_held(&kernel_lock) > 0);
-#endif
+	KERNEL_ASSERT_LOCKED();
 	atomic_setbits_int(&p->p_flag, P_INKTR);
 	ktrinitheader(&kth, p, KTR_STRUCT);
 	
@@ -348,7 +345,7 @@ ktrstruct(struct proc *p, const char *name, const void *data, size_t datalen)
 	kth.ktr_len = buflen;
 
 	ktrwrite(p, &kth, buf);
-	free(buf, M_TEMP);
+	free(buf, M_TEMP, buflen);
 	atomic_clearbits_int(&p->p_flag, P_INKTR);
 }
 
@@ -389,7 +386,7 @@ ktruser(struct proc *p, const char *id, const void *addr, size_t len)
 	ktrwrite(p, &kth, ktp);
 out:
 	if (memp != NULL)
-		free(memp, M_TEMP);
+		free(memp, M_TEMP, sizeof(*ktp) + len);
 	atomic_clearbits_int(&p->p_flag, P_INKTR);
 	return (error);
 }

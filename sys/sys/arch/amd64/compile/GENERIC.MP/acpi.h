@@ -1,1 +1,0 @@
-#define	NACPI	1

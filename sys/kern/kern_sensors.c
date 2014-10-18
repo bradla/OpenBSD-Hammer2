@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_sensors.c,v 1.27 2013/12/09 17:39:08 mikeb Exp $	*/
+/*	$OpenBSD: kern_sensors.c,v 1.29 2014/09/14 14:17:25 jsg Exp $	*/
 
 /*
  * Copyright (c) 2005 David Gwynne <dlg@openbsd.org>
@@ -18,7 +18,6 @@
  */
 
 #include <sys/param.h>
-#include <sys/proc.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
@@ -248,7 +247,7 @@ sensor_task_work(void *xst, void *arg)
 	rw_exit_write(&st->lock);
 
 	if (period == 0)
-		free(st, M_DEVBUF);
+		free(st, M_DEVBUF, 0);
 	else 
 		timeout_add_sec(&st->timeout, period);
 }

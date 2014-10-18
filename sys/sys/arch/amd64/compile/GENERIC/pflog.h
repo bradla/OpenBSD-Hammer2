@@ -1,1 +1,0 @@
-#define	NPFLOG	1

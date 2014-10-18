@@ -36,6 +36,7 @@
 /*
  * Rollup headers for hammer2 utility
  */
+#include <sys/param.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/queue.h>

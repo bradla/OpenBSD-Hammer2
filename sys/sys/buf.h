@@ -1,4 +1,4 @@
-/*	$OpenBSD: buf.h,v 1.94 2014/04/10 13:48:24 tedu Exp $	*/
+/*	$OpenBSD: buf.h,v 1.95 2014/08/31 21:08:48 tedu Exp $	*/
 /*	$NetBSD: buf.h,v 1.25 1997/04/09 21:12:17 mycroft Exp $	*/
 
 /*
@@ -149,6 +149,8 @@ extern struct bio_ops {
 #define b_actf	b_bufq.bufq_data_disksort.bqd_actf
 #define b_actb	b_bufq.bufq_data_disksort.bqd_actb
 
+#define NBUF_BIO 6
+
 /*
  * BIO encapsulation for storage drivers and systems that do not require
  * caching support for underlying blocks.
@@ -158,38 +160,38 @@ extern struct bio_ops {
  *
  * bio_track is only non-NULL when an I/O is in progress.
  */
-struct bio_h2 {
-        TAILQ_ENTRY(bio) bio_act;       /* driver queue when active */
-        TAILQ_ENTRY(bio) link;
-        struct bio_track *bio_track;    /* BIO tracking structure */
-        struct disk     *bio_disk;
-        struct bio      *bio_prev;      /* BIO stack */
-        struct bio      *bio_next;      /* BIO stack / cached translations */
-        struct buf      *bio_buf;       /* High-level buffer back-pointer. */
-        //biodone_t       *bio_done;      /* MPSAFE caller completion function */
-        off_t           bio_offset;     /* Logical offset relative to device */
-        void            *bio_driver_info;
-        int             bio_flags;
-        union {
-                void    *ptr;
-                off_t   offset;
-                int     index;
-                u_int32_t uvalue32;
-                struct buf *cluster_head;
-                struct bio *cluster_parent;
-        } bio_caller_info1;
-        union {
-                void    *ptr;
-                off_t   offset;
-                int     index;
-                struct buf *cluster_tail;
-        } bio_caller_info2;
-        union {
-                void    *ptr;
-                int     value;
-                long    lvalue;
-                struct  timeval tv;
-        } bio_caller_info3;
+struct bio2 {
+	TAILQ_ENTRY(bio) bio_act;	/* driver queue when active */
+	TAILQ_ENTRY(bio) link;
+	struct bio_track *bio_track;	/* BIO tracking structure */
+	struct disk	*bio_disk;
+	struct bio	*bio_prev;	/* BIO stack */
+	struct bio	*bio_next;	/* BIO stack / cached translations */
+	struct buf	*bio_buf;   	/* High-level buffer back-pointer. */
+	//biodone_t	*bio_done;   	/* MPSAFE caller completion function */
+	off_t		bio_offset;	/* Logical offset relative to device */
+	void		*bio_driver_info;
+	int		bio_flags;
+	union {
+		void	*ptr;
+		off_t	offset;
+		int	index;
+		u_int32_t uvalue32;
+		struct buf *cluster_head;
+		struct bio *cluster_parent;
+	} bio_caller_info1;
+	union {
+		void	*ptr;
+		off_t	offset;
+		int	index;
+		struct buf *cluster_tail;
+	} bio_caller_info2;
+	union {
+		void	*ptr;
+		int	value;
+		long	lvalue;
+		struct	timeval tv;
+	} bio_caller_info3;
 };
 
 /* The buffer header describes an I/O operation in the kernel. */
@@ -227,7 +229,7 @@ struct buf {
 	int	b_validoff;		/* Offset in buffer of valid region. */
 	int	b_validend;		/* Offset of end of valid region. */
  	struct	workhead b_dep;		/* List of filesystem dependencies. */
-        struct bio_h2 b_bio_array[6]; /* BIO translation layers */
+	struct bio2 b_bio_array[NBUF_BIO]; /* BIO translation layers */ 
 };
 
 /* Device driver compatibility definitions. */
@@ -260,6 +262,8 @@ struct buf {
 #define	B_SCANNED	0x00100000	/* Block already pushed during sync */
 #define	B_PDAEMON	0x00200000	/* I/O started by pagedaemon */
 #define	B_RELEASED	0x00400000	/* free this buffer after its kvm */
+#define	B_WARM		0x00800000	/* keep this buffer on warmqueue */
+#define	B_COLD		0x01000000	/* keep this buffer on coldqueue */
 
 #define	B_BITS	"\20\001AGE\002NEEDCOMMIT\003ASYNC\004BAD\005BUSY" \
     "\006CACHE\007CALL\010DELWRI\011DONE\012EINTR\013ERROR" \
@@ -339,8 +343,6 @@ struct buf *incore(struct vnode *, daddr_t);
 /*
  * bufcache functions
  */
-void bufcache_init(void);
-
 void bufcache_take(struct buf *);
 void bufcache_release(struct buf *);
 
@@ -422,13 +424,6 @@ buf_countdeps(struct buf *bp, int i, int islocked)
 }
 
 void	cluster_write(struct buf *, struct cluster_info *, u_quad_t);
-int	cluster_read(struct vnode *vp, off_t filesize, off_t loffset, 
-              	int blksize, size_t resid, int seqcount, struct buf **bpp);
-
-void   cluster_readcb (struct vnode *, off_t, off_t, int,
-           size_t, size_t, void (*func)(struct bio *), void *arg);
-void    breadcb(struct vnode *, off_t, int,
-           void (*)(struct bio *), void *);
 
 __END_DECLS
 #endif /* _KERNEL */

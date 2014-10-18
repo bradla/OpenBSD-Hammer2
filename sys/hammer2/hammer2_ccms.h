@@ -84,12 +84,8 @@ typedef uint8_t		ccms_type_t;
 struct ccms_cst;
 struct ccms_lock;
 
-TAILQ_HEAD(h2_flush_deferral_list, hammer2_chain);
-TAILQ_HEAD(h2_core_list, hammer2_chain);
-
 
 #undef KKASSERT
-//#define KKASSERT(cond, msg)
 /* XXX temporary porting goop */
 #define KKASSERT(cond) if (!(cond)) panic("KKASSERT: %s in %s", #cond, __func__)
 #undef KASSERT
@@ -230,24 +226,6 @@ struct ccms_domain {
 typedef struct ccms_lock	ccms_lock_t;
 typedef struct ccms_cst		ccms_cst_t;
 typedef struct ccms_domain	ccms_domain_t;
-
-struct hammer2_chain_core {
-	int             good;
-	struct ccms_cst cst;
-	struct h2_core_list ownerq;       /* all chains sharing this core */
-	struct hammer2_chain_tree *rbtree; /* live chains */
-	struct hammer2_chain_tree *dbtree; /* bmapped deletions */
-	struct h2_core_list dbq;          /* other deletions */
-	int             live_zero;      /* blockref array opt */
-	u_int           sharecnt;
-	u_int           flags;
-	u_int           live_count;     /* live (not deleted) chains in tree */
-	u_int           chain_count;    /* live + deleted chains under core */
-	int             generation;     /* generation number (inserts only) */
-} __packed;
-
-typedef struct hammer2_chain_core hammer2_chain_core_t;
-
 
 /*
  * Kernel API

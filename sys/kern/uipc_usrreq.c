@@ -1,4 +1,4 @@
-/*	$OpenBSD: uipc_usrreq.c,v 1.73 2014/03/18 06:59:00 guenther Exp $	*/
+/*	$OpenBSD: uipc_usrreq.c,v 1.77 2014/08/31 01:42:36 guenther Exp $	*/
 /*	$NetBSD: uipc_usrreq.c,v 1.18 1996/02/09 19:00:50 christos Exp $	*/
 
 /*
@@ -394,10 +394,10 @@ unp_detach(struct unpcb *unp)
 		 * gets them (resulting in a "panic: closef: count < 0").
 		 */
 		sorflush(unp->unp_socket);
-		free(unp, M_PCB);
+		free(unp, M_PCB, 0);
 		unp_gc();
 	} else
-		free(unp, M_PCB);
+		free(unp, M_PCB, 0);
 }
 
 int
@@ -429,7 +429,7 @@ unp_bind(struct unpcb *unp, struct mbuf *nam, struct proc *p)
 	nam2->m_len = sizeof(struct sockaddr_un);
 	memcpy(mtod(nam2, struct sockaddr_un *), soun,
 	    offsetof(struct sockaddr_un, sun_path) + pathlen);
-	/* No need to NUL terminate: m_getclr() returns bzero'd mbufs. */
+	/* No need to NUL terminate: m_getclr() returns zero'd mbufs. */
 
 	soun = mtod(nam2, struct sockaddr_un *);
 
@@ -636,7 +636,7 @@ unp_drop(struct unpcb *unp, int errno)
 		so->so_pcb = NULL;
 		sofree(so);
 		m_freem(unp->unp_addr);
-		free(unp, M_PCB);
+		free(unp, M_PCB, 0);
 	}
 }
 
@@ -648,7 +648,7 @@ unp_drain(void)
 #endif
 
 int
-unp_externalize(struct mbuf *rights, socklen_t controllen)
+unp_externalize(struct mbuf *rights, socklen_t controllen, int flags)
 {
 	struct proc *p = curproc;		/* XXX */
 	struct cmsghdr *cm = mtod(rights, struct cmsghdr *);
@@ -670,7 +670,7 @@ unp_externalize(struct mbuf *rights, socklen_t controllen)
 
 	rp = (struct file **)CMSG_DATA(cm);
 
-	fdp = malloc(nfds * sizeof(int), M_TEMP, M_WAITOK);
+	fdp = mallocarray(nfds, sizeof(int), M_TEMP, M_WAITOK);
 
 	/* Make sure the recipient should be able to see the descriptors.. */
 	if (p->p_fd->fd_rdir != NULL) {
@@ -744,6 +744,9 @@ restart:
 		 * in the loop below.
 		 */
 		p->p_fd->fd_ofiles[fdp[i]] = *rp++;
+
+		if (flags & MSG_CMSG_CLOEXEC)
+			p->p_fd->fd_ofileflags[fdp[i]] |= UF_EXCLOSE;
 	}
 
 	/*
@@ -767,7 +770,7 @@ restart:
  out:
 	fdpunlock(p->p_fd);
 	if (fdp)
-		free(fdp, M_TEMP);
+		free(fdp, M_TEMP, 0);
 	return (error);
 }
 
@@ -810,14 +813,14 @@ morespace:
 		/* allocate a cluster and try again */
 		MCLGET(control, M_WAIT);
 		if ((control->m_flags & M_EXT) == 0) {
-			free(tmp, M_TEMP);
+			free(tmp, M_TEMP, 0);
 			return (ENOBUFS);       /* allocation failed */
 		}
 
 		/* copy the data back into the cluster */
 		cm = mtod(control, struct cmsghdr *);
 		memcpy(cm, tmp, control->m_len);
-		free(tmp, M_TEMP);
+		free(tmp, M_TEMP, 0);
 		goto morespace;
 	}
 
@@ -961,7 +964,7 @@ unp_gc(void)
 	 *
 	 * 91/09/19, bsy@cs.cmu.edu
 	 */
-	extra_ref = malloc(nfiles * sizeof(struct file *), M_FILE, M_WAITOK);
+	extra_ref = mallocarray(nfiles, sizeof(struct file *), M_FILE, M_WAITOK);
 	for (nunref = 0, fp = LIST_FIRST(&filehead), fpp = extra_ref;
 	    fp != NULL; fp = nextfp) {
 		nextfp = LIST_NEXT(fp, f_list);
@@ -980,7 +983,7 @@ unp_gc(void)
 		        sorflush((*fpp)->f_data);
 	for (i = nunref, fpp = extra_ref; --i >= 0; ++fpp)
 		(void) closef(*fpp, NULL);
-	free(extra_ref, M_FILE);
+	free(extra_ref, M_FILE, 0);
 	unp_gcing = 0;
 }
 

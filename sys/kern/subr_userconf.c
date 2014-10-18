@@ -1,4 +1,4 @@
-/*	$OpenBSD: subr_userconf.c,v 1.39 2014/01/21 01:48:44 tedu Exp $	*/
+/*	$OpenBSD: subr_userconf.c,v 1.42 2014/07/23 20:49:53 mpi Exp $	*/
 
 /*
  * Copyright (c) 1996-2001 Mats O Jansson <moj@stacken.kth.se>
@@ -485,7 +485,7 @@ userconf_change(int devno)
 			if (share) {
 				for (i = 0; locnamp[ln+i] != -1 ; i++)
 					;
-				lk = l = (int *)malloc(sizeof(int) * i,
+				lk = l = mallocarray(i, sizeof(int),
 				    M_TEMP, M_NOWAIT);
 				if (lk == NULL) {
 					printf("out of memory.\n");
@@ -510,7 +510,7 @@ userconf_change(int devno)
 				if (memcmp(cd->cf_loc, lk, sizeof(int) * i))
 					cd->cf_loc = lk;
 				else
-					free(lk, M_TEMP);
+					free(lk, M_TEMP, 0);
 			}
 
 			printf("%3d ", devno);
@@ -1348,11 +1348,14 @@ user_config(void)
 	userconf_init();
 	printf("User Kernel Config\n");
 
+	cnpollc(1);
 	while (1) {
 		printf("UKC> ");
 		if (getsn(userconf_cmdbuf, sizeof(userconf_cmdbuf)) > 0 &&
 		    userconf_parse(userconf_cmdbuf))
 			break;
 	}
+	cnpollc(0);
+
 	printf("Continuing...\n");
 }

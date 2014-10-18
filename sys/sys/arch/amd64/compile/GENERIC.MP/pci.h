@@ -1,1 +1,0 @@
-#define	NPCI	1

@@ -1,1 +1,0 @@
-#define	NGPR	0

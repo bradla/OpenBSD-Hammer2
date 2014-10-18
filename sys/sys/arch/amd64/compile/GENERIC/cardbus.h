@@ -1,1 +1,0 @@
-#define	NCARDBUS	1

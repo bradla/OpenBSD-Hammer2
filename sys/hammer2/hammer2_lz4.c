@@ -35,9 +35,10 @@
 Note : this source file requires "hammer2_lz4_encoder.h"
 */
 
-//**************************************
-// Tuning parameters
-//**************************************
+/**************************************
+* Tuning parameters
+**************************************/
+
 // MEMORY_USAGE :
 // Memory usage formula : N->2^N Bytes (examples : 10 -> 1KB; 12 -> 4KB;
 // 16 -> 64KB; 20 -> 1MB; etc.)
@@ -64,9 +65,9 @@ Note : this source file requires "hammer2_lz4_encoder.h"
 //#define BIG_ENDIAN_NATIVE_BUT_INCOMPATIBLE 1
 
 
-//**************************************
-// CPU Feature Detection
-//**************************************
+/**************************************
+* CPU Feature Detection
+**************************************/
 // 32 or 64 bits ?
 #if (defined(__x86_64__) || defined(_M_X64))   // Detects 64 bits mode
 #  define LZ4_ARCH64 1
@@ -81,9 +82,10 @@ Note : this source file requires "hammer2_lz4_encoder.h"
 //hardware bit count, also enabled by default, and Microsoft/Visual
 //Studio compilers.
 
-//**************************************
-// Compiler Options
-//**************************************
+/**************************************
+* Compiler Options
+**************************************/
+
 #if defined (__STDC_VERSION__) && __STDC_VERSION__ >= 199901L   // C99
 /* "restrict" is a known keyword */
 #else
@@ -102,9 +104,10 @@ Note : this source file requires "hammer2_lz4_encoder.h"
 #define unlikely(expr)   expect((expr) != 0, 0)
 
 
-//**************************************
-// Includes
-//**************************************
+/**************************************
+* Includes
+**************************************/
+
 //#include <sys/malloc.h> //for malloc macros
 #include "hammer2.h"
 #include "hammer2_lz4.h"
@@ -115,15 +118,12 @@ Note : this source file requires "hammer2_lz4_encoder.h"
 /*MALLOC_DEFINE(C_HASHTABLE, "comphashtable",
 	"A hash table used by LZ4 compression function.");
 */
-
 #define C_HASHTABLE "comphashtable"
 
 
-
-
-//**************************************
-// Basic Types
-//**************************************
+/**************************************
+* Basic Types
+**************************************/
 #if defined (__STDC_VERSION__) && __STDC_VERSION__ >= 199901L   // C99
 # include <stdint.h>
   typedef uint8_t  BYTE;
@@ -342,7 +342,7 @@ LZ4_create(void)
 int
 LZ4_free(void* ctx)
 {
-	free(ctx, (long long)C_HASHTABLE);
+	free(ctx, (long long)C_HASHTABLE, 0);
 	return 0;
 }
 

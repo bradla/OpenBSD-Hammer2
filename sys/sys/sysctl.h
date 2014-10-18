@@ -1,4 +1,4 @@
-/*	$OpenBSD: sysctl.h,v 1.144 2014/03/30 21:54:48 guenther Exp $	*/
+/*	$OpenBSD: sysctl.h,v 1.149 2014/08/20 06:23:03 mikeb Exp $	*/
 /*	$NetBSD: sysctl.h,v 1.16 1996/04/09 20:55:36 cgd Exp $	*/
 
 /*
@@ -38,7 +38,7 @@
 #ifndef _SYS_SYSCTL_H_
 #define	_SYS_SYSCTL_H_
 
-#include <uvm/uvm_extern.h>
+#include <uvm/uvmexp.h>
 
 /*
  * Definitions for sysctl call.  The sysctl call uses a hierarchical name
@@ -152,15 +152,15 @@ struct ctlname {
 #define	KERN_POOL		49	/* struct: pool information */
 #define	KERN_STACKGAPRANDOM	50	/* int: stackgap_random */
 #define	KERN_SYSVIPC_INFO	51	/* struct: SysV sem/shm/msg info */
-#define KERN_USERCRYPTO		52	/* int: usercrypto */
-#define KERN_CRYPTODEVALLOWSOFT	53	/* int: cryptodevallowsoft */
+/* was define KERN_USERCRYPTO	52	*/
+/* was define KERN_CRYPTODEVALLOWSOFT	53	*/
 #define KERN_SPLASSERT		54	/* int: splassert */
 #define KERN_PROC_ARGS		55	/* node: proc args and env */
 #define	KERN_NFILES		56	/* int: number of open files */
 #define	KERN_TTYCOUNT		57	/* int: number of tty devices */
 #define KERN_NUMVNODES		58	/* int: number of vnodes in use */
 #define	KERN_MBSTAT		59	/* struct: mbuf statistics */
-#define KERN_USERASYMCRYPTO	60	/* int: usercrypto */
+/* was define KERN_USERASYMCRYPTO	60	*/
 #define	KERN_SEMINFO		61	/* struct: SysV struct seminfo */
 #define	KERN_SHMINFO		62	/* struct: SysV struct shminfo */
 #define KERN_INTRCNT		63	/* node: interrupt counters */
@@ -179,7 +179,8 @@ struct ctlname {
 #define	KERN_NETLIVELOCKS	76	/* int: number of network livelocks */
 #define	KERN_POOL_DEBUG		77	/* int: enable pool_debug */
 #define	KERN_PROC_CWD		78      /* node: proc cwd */
-#define	KERN_MAXID		79	/* number of valid kern ids */
+#define	KERN_PROC_NOBROADCASTKILL 79	/* node: proc no broadcast kill */
+#define	KERN_MAXID		80	/* number of valid kern ids */
 
 #define	CTL_KERN_NAMES { \
 	{ 0, 0 }, \
@@ -234,15 +235,15 @@ struct ctlname {
 	{ "pool", CTLTYPE_NODE }, \
 	{ "stackgap_random", CTLTYPE_INT }, \
 	{ "sysvipc_info", CTLTYPE_INT }, \
-	{ "usercrypto", CTLTYPE_INT }, \
-	{ "cryptodevallowsoft", CTLTYPE_INT }, \
+	{ "gap", 0 }, \
+	{ "gap", 0 }, \
 	{ "splassert", CTLTYPE_INT }, \
 	{ "procargs", CTLTYPE_NODE }, \
 	{ "nfiles", CTLTYPE_INT }, \
 	{ "ttycount", CTLTYPE_INT }, \
 	{ "numvnodes", CTLTYPE_INT }, \
 	{ "mbstat", CTLTYPE_STRUCT }, \
-	{ "userasymcrypto", CTLTYPE_INT }, \
+	{ "gap", 0 }, \
 	{ "seminfo", CTLTYPE_STRUCT }, \
 	{ "shminfo", CTLTYPE_STRUCT }, \
 	{ "intrcnt", CTLTYPE_NODE }, \
@@ -261,6 +262,7 @@ struct ctlname {
 	{ "netlivelocks", CTLTYPE_INT }, \
 	{ "pool_debug", CTLTYPE_INT }, \
 	{ "proc_cwd", CTLTYPE_NODE }, \
+	{ "proc_nobroadcastkill", CTLTYPE_NODE }, \
 }
 
 /*
@@ -357,8 +359,8 @@ struct kinfo_proc {
 	u_int32_t p_rtime_sec;		/* STRUCT TIMEVAL: Real time. */
 	u_int32_t p_rtime_usec;		/* STRUCT TIMEVAL: Real time. */
 	int32_t	p_cpticks;		/* INT: Ticks of cpu time. */
-	u_int32_t p_pctcpu;		/* FIXPT_T: %cpu for this process during p_swtime */
-	u_int32_t p_swtime;		/* U_INT: Time swapped in or out. */
+	u_int32_t p_pctcpu;		/* FIXPT_T: %cpu for this process */
+	u_int32_t p_swtime;		/* unused, always zero */
 	u_int32_t p_slptime;		/* U_INT: Time since last blocked. */
 	int32_t	p_schedflags;		/* INT: PSCHED_* flags */
 
@@ -469,9 +471,9 @@ do {									\
 									\
 	if (show_addresses) {						\
 		(kp)->p_paddr = PTRTOINT64(paddr);			\
-		(kp)->p_fd = PTRTOINT64((p)->p_fd);			\
+		(kp)->p_fd = PTRTOINT64((pr)->ps_fd);			\
 		(kp)->p_limit = PTRTOINT64((pr)->ps_limit);		\
-		(kp)->p_vmspace = PTRTOINT64((p)->p_vmspace);		\
+		(kp)->p_vmspace = PTRTOINT64((pr)->ps_vmspace);		\
 		(kp)->p_sigacts = PTRTOINT64((pr)->ps_sigacts);		\
 		(kp)->p_sess = PTRTOINT64((pg)->pg_session);		\
 		(kp)->p_ru = PTRTOINT64((pr)->ps_ru);			\
@@ -513,7 +515,6 @@ do {									\
 		(kp)->p_iticks = (pr)->ps_tu.tu_iticks;			\
 	}								\
 	(kp)->p_cpticks = (p)->p_cpticks;				\
-	(kp)->p_pctcpu = (p)->p_pctcpu;					\
 									\
 	if (show_addresses)						\
 		(kp)->p_tracep = PTRTOINT64((pr)->ps_tracevp);		\
@@ -542,7 +543,7 @@ do {									\
 	if ((sess)->s_leader == (praddr))				\
 		(kp)->p_eflag |= EPROC_SLEADER;				\
 									\
-	if ((p)->p_stat != SIDL && !P_ZOMBIE(p)) {			\
+	if (((pr)->ps_flags & (PS_EMBRYO | PS_ZOMBIE)) == 0) {		\
 		if ((vm) != NULL) {					\
 			(kp)->p_vm_rssize = (vm)->vm_rssize;		\
 			(kp)->p_vm_tsize = (vm)->vm_tsize;		\
@@ -551,7 +552,6 @@ do {									\
 		}							\
 		(kp)->p_addr = PTRTOINT64((p)->p_addr);			\
 		(kp)->p_stat = (p)->p_stat;				\
-		(kp)->p_swtime = (p)->p_swtime;				\
 		(kp)->p_slptime = (p)->p_slptime;			\
 		(kp)->p_holdcnt = 1;					\
 		(kp)->p_priority = (p)->p_priority;			\
@@ -567,7 +567,7 @@ do {									\
 		(kp)->p_rlim_rss_cur =					\
 		    (lim)->pl_rlimit[RLIMIT_RSS].rlim_cur;		\
 									\
-	if (!P_ZOMBIE(p)) {						\
+	if (((pr)->ps_flags & PS_ZOMBIE) == 0) {			\
 		struct timeval tv;					\
 									\
 		(kp)->p_uvalid = 1;					\

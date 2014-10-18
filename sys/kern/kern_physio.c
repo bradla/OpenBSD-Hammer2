@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_physio.c,v 1.39 2011/07/18 02:49:20 matthew Exp $	*/
+/*	$OpenBSD: kern_physio.c,v 1.41 2014/09/14 14:17:25 jsg Exp $	*/
 /*	$NetBSD: kern_physio.c,v 1.28 1997/05/19 10:43:28 pk Exp $	*/
 
 /*-
@@ -42,7 +42,6 @@
 #include <sys/systm.h>
 #include <sys/buf.h>
 #include <sys/conf.h>
-#include <sys/proc.h>
 #include <sys/pool.h>
 
 #include <uvm/uvm_extern.h>
@@ -128,12 +127,8 @@ physio(void (*strategy)(struct buf *), dev_t dev, int flags,
 			 */
 			(*minphys)(bp);
 			todo = bp->b_bcount;
-#ifdef DIAGNOSTIC
-			if (todo < 0)
-				panic("todo < 0; minphys broken");
-			if (todo > MAXPHYS)
-				panic("todo > MAXPHYS; minphys broken");
-#endif
+			KASSERTMSG(todo >= 0, "minphys broken");
+			KASSERTMSG(todo <= MAXPHYS, "minphys broken");
 
 			/*
 			 * [lock the part of the user address space involved
@@ -194,12 +189,8 @@ physio(void (*strategy)(struct buf *), dev_t dev, int flags,
 			 *    of data to transfer]
 			 */
 			done = bp->b_bcount - bp->b_resid;
-#ifdef DIAGNOSTIC
-			if (done < 0)
-				panic("done < 0; strategy broken");
-			if (done > todo)
-				panic("done > todo; strategy broken");
-#endif
+			KASSERTMSG(done >= 0, "strategy broken");
+			KASSERTMSG(done <= todo, "strategy broken");
 			iovp->iov_len -= done;
 			iovp->iov_base = (caddr_t)iovp->iov_base + done;
 			uio->uio_offset += done;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: vnode.h,v 1.124 2014/04/08 18:48:41 beck Exp $	*/
+/*	$OpenBSD: vnode.h,v 1.125 2014/09/08 01:47:06 guenther Exp $	*/
 /*	$NetBSD: vnode.h,v 1.38 1996/02/29 20:59:05 cgd Exp $	*/
 
 /*
@@ -40,6 +40,7 @@
 #include <sys/queue.h>
 #include <sys/selinfo.h>
 #include <sys/tree.h>
+#include <sys/uuid.h>
 
 #include <uvm/uvm_extern.h>
 #include <uvm/uvm_vnode.h>
@@ -69,13 +70,75 @@ enum vtype	{ VNON, VREG, VDIR, VBLK, VCHR, VLNK, VSOCK, VFIFO, VBAD };
 enum vtagtype	{
 	VT_NON, VT_UFS, VT_NFS, VT_MFS, VT_MSDOSFS,
 	VT_PORTAL, VT_PROCFS, VT_AFS, VT_ISOFS, VT_ADOSFS,
-	VT_EXT2FS, VT_VFS, VT_NTFS, VT_HAMMER2, VT_UDF, VT_FUSEFS, VT_TMPFS,
+	VT_EXT2FS, VT_VFS, VT_HAMMER2, VT_NTFS, VT_UDF, VT_FUSEFS, VT_TMPFS,
 };
 
 #define	VTAG_NAMES \
     "NON", "UFS", "NFS", "MFS", "MSDOSFS",			\
-    "PORTAL", "PROCFS", "AFS", "ISOFS", "ADOSFS",		\
-    "EXT2FS", "VFS", "NTFS", "HAMMER2", "UDF", "FUSEFS", "TMPFS"
+    "unused", "unused", "unused", "ISOFS", "unused",		\
+    "EXT2FS", "VFS", "NTFS", "UDF", "FUSEFS", "TMPFS"
+
+
+/*
+ * A VM object which represents an arbitrarily sized data store.
+ *
+ * NOTE:
+ *      shadow_head is only used by OBJT_DEFAULT or OBJT_SWAP objects.
+ *      OBJT_VNODE objects explicitly do not keep track of who is shadowing
+ *      them.
+ *
+ * LOCKING:
+ *      vmobj_tokens[n] for object_list, hashed by address.
+ *
+ *      vm_object_hold/drop() for most vm_object related operations.
+ *      OBJ_CHAINLOCK to avoid chain/shadow object collisions.
+ */
+struct vm_object {
+        TAILQ_ENTRY(vm_object) object_list; /* locked by vmobj_tokens[n] */
+        LIST_HEAD(, vm_object) shadow_head; /* objects we are a shadow for */
+        LIST_ENTRY(vm_object) shadow_list;  /* chain of shadow objects */
+        RB_HEAD(vm_page_rb_tree, vm_page) rb_memq;      /* resident pages */
+        int generation;                 /* generation ID */
+        //vm_pindex_t size;             /* Object size */
+        int ref_count;
+        int shadow_count;               /* count of objs we are a shadow for */
+        //vm_memattr_t memattr;         /* default memory attribute for pages */
+        //objtype_t type;                       /* type of pager */
+        u_short flags;                  /* see below */
+        u_short pg_color;               /* color of first page in obj */
+        u_int paging_in_progress;       /* Paging (in or out) so don't collapse or destroy */
+        int resident_page_count;        /* number of resident pages */
+        u_int agg_pv_list_count;        /* aggregate pv list count */
+        //struct vm_object *backing_object; /* object that I'm a shadow of */
+        //vm_ooffset_t backing_object_offset;/* Offset in backing object */
+        TAILQ_ENTRY(vm_object) pager_object_list; /* list of all objects of this pager type */
+        void *handle;                   /* control handle: vp, etc */
+        int hold_count;                 /* count prevents destruction */
+
+        union {
+                /*
+                 * Device pager
+                 *
+                 *      devp_pglist - list of allocated pages
+                 */
+                struct {
+                        TAILQ_HEAD(, vm_page) devp_pglist;
+                        struct cdev_pager_ops *ops;
+                        struct cdev *dev;
+                } devp;
+        } un_pager;
+
+        /*
+         * OBJT_SWAP and OBJT_VNODE VM objects may have swap backing
+         * store.  For vnodes the swap backing store acts as a fast
+         * data cache but the vnode contains the official data.
+         */
+        RB_HEAD(swblock_rb_tree, swblock) swblock_root;
+        int     swblock_count;
+        //struct        lwkt_token      token;
+        //struct md_object      md;     /* machine specific (typ pmap) */
+        uint32_t                chainlk;/* chaining lock */
+};
 
 /*
  * Each underlying filesystem allocates its own private area and hangs
@@ -86,14 +149,7 @@ LIST_HEAD(buflists, buf);
 RB_HEAD(buf_rb_bufs, buf);
 RB_HEAD(namecache_rb_cache, namecache);
 
-/*
- * Used to maintain information about processes that wish to be
- * notified when I/O becomes possible.
- */
-struct kqinfo {
-        struct  klist ki_note;          /* kernel note list */
-        //struct  notifymsglist ki_mlist; /* list of pending predicate messages */
-};
+RB_HEAD(buf_rb_tree, buf);
 
 struct vnode {
 	struct uvm_vnode v_uvm;			/* uvm data */
@@ -113,6 +169,9 @@ struct vnode {
 	struct	buf_rb_bufs v_bufs_tree;	/* lookup of all bufs */
 	struct	buflists v_cleanblkhd;		/* clean blocklist head */
 	struct	buflists v_dirtyblkhd;		/* dirty blocklist head */
+	struct buf_rb_tree v_rbclean_tree;	/* RB tree of clean bufs */
+	struct buf_rb_tree v_rbdirty_tree;	/* RB tree of dirty bufs */
+	//struct buf_rb_hash v_rbhash_tree;	/* RB tree general lookup */
 	u_int   v_numoutput;			/* num of writes in progress */
 	LIST_ENTRY(vnode) v_synclist;		/* vnode with dirty buffers */
 	union {
@@ -120,6 +179,13 @@ struct vnode {
 		struct socket	*vu_socket;	/* unix ipc (VSOCK) */
 		struct specinfo	*vu_specinfo;	/* device (VCHR, VBLK) */
 		struct fifoinfo	*vu_fifoinfo;	/* fifo (VFIFO) */
+
+		struct {
+			int	vu_umajor;	/* device number for attach */
+			int	vu_uminor;
+			struct cdev	*vu_cdevinfo; /* device (VCHR, VBLK) */
+			SLIST_ENTRY(vnode) vu_cdevnext;
+		} vu_cdev;
 	} v_un;
 
 	/* VFS namecache */
@@ -129,9 +195,8 @@ struct vnode {
 	enum	vtagtype v_tag;			/* type of underlying data */
 	void	*v_data;			/* private data for fs */
 	struct	selinfo v_selectinfo;		/* identity of poller(s) */
-        struct  {
-                struct  kqinfo vpi_kqinfo;      /* identity of poller(s) */
-        } v_pollinfo;
+	struct vm_object *v_object;	/* Place to store VM object */
+	struct vop_ops **v_ops;			/* vnode operations vector */
 };
 #define	v_mountedhere	v_un.vu_mountedhere
 #define	v_socket	v_un.vu_socket
@@ -162,18 +227,6 @@ struct vnode {
 #define VBIOONSYNCLIST	0x0002	/* Vnode is on syncer worklist */
 #define VBIOONFREELIST  0x0004  /* Vnode is on a free list */
 
-struct uuid {
-        uint32_t        time_low;
-        uint16_t        time_mid;
-        uint16_t        time_hi_and_version;
-        uint8_t         clock_seq_hi_and_reserved;
-        uint8_t         clock_seq_low;
-        uint8_t         node[6];
-};
-
-typedef struct uuid uuid_t;
-
-
 /*
  * Vnode attributes.  A field value of VNOVAL represents a field whose value
  * is unavailable (getattr) or which is not to be changed (setattr).
@@ -198,8 +251,9 @@ struct vattr {
 	u_quad_t	va_filerev;	/* file modification number */
 	u_int		va_vaflags;	/* operations flags, see below */
 	long		va_spare;	/* remain quad aligned */
-	uuid_t 		va_uid_uuid;	/* native uuids if available */
-	uuid_t 		va_gid_uuid;
+	struct uuid     va_uid_uuid;	/* native uuids if available */
+	struct uuid 	va_gid_uuid;
+//	uuid_t		va_fsid_uuid;
 };
 
 /*
@@ -323,19 +377,6 @@ struct vops {
 	int	(*vop_symlink)(void *);
 	int	(*vop_write)(void *);
 	int	(*vop_kqfilter)(void *);
-	int 	(*vop_nresolve)(void *);
-	int 	(*vop_nlookupdotdot)(void *);
-	int	(*vop_nmkdir)(void *);
-	int	(*vop_nmknod)(void *);
-	int	(*vop_mountctl)(void *);
-	int     (*vop_nlink)(void *);
- 	int	(*vop_ncreate)(void *);
-	int	(*vop_nsymlink)(void *);
-	int	(*vop_nremove)(void *);
-	int	(*vop_nrmdir)(void *);
-	int	(*vop_nrename)(void *);
-	int	(*vop_markatime)(void *);
-	int	(*vop_fifokqfilter)(void *);
 };
 
 extern struct vops dead_vops;
@@ -344,7 +385,6 @@ extern struct vops spec_vops;
 struct vop_generic_args {
 	void		*a_garbage;
 	/* Other data probably follows; */
-	struct vop_ops *a_ops;          /* operations vector for the call */
 };
 
 struct vop_islocked_args {
@@ -452,10 +492,8 @@ struct vop_poll_args {
 int VOP_POLL(struct vnode *, int, struct proc *);
 
 struct vop_kqfilter_args {
-        struct vop_generic_args a_head;
 	struct vnode *a_vp;
 	struct knote *a_kn;
-
 };
 int VOP_KQFILTER(struct vnode *, struct knote *);
 
@@ -484,6 +522,7 @@ struct vop_link_args {
 	struct vnode *a_dvp;
 	struct vnode *a_vp;
 	struct componentname *a_cnp;
+	struct nchandle *a_nch;
 };
 int VOP_LINK(struct vnode *, struct vnode *, struct componentname *);
 
@@ -578,9 +617,9 @@ struct vop_bmap_args {
 	daddr_t a_bn;
 	struct vnode **a_vpp;
 	daddr_t *a_bnp;
+	off_t *a_doffsetp;
 	int *a_runp;
-        off_t *a_doffsetp;
-        int *a_runb;
+	int *a_runb;
 };
 int VOP_BMAP(struct vnode *, daddr_t, struct vnode **, daddr_t *, int *);
 
@@ -614,7 +653,7 @@ int VOP_REALLOCBLKS(struct vnode *, struct cluster_save *);
 /* Special cases: */
 struct vop_strategy_args {
 	struct buf *a_bp;
-        struct vnode *a_vp;
+	struct vnode *a_vp;
 	struct bio *a_bio;
 };
 int VOP_STRATEGY(struct buf *);

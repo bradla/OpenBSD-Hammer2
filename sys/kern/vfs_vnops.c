@@ -1,4 +1,4 @@
-/*	$OpenBSD: vfs_vnops.c,v 1.75 2014/01/24 06:00:01 guenther Exp $	*/
+/*	$OpenBSD: vfs_vnops.c,v 1.78 2014/07/13 15:00:40 tedu Exp $	*/
 /*	$NetBSD: vfs_vnops.c,v 1.20 1996/02/04 02:18:41 christos Exp $	*/
 
 /*
@@ -56,8 +56,6 @@
 #include <sys/poll.h>
 #include <sys/filedesc.h>
 #include <sys/specdev.h>
-
-#include <uvm/uvm_extern.h>
 
 int vn_read(struct file *, off_t *, struct uio *, struct ucred *);
 int vn_write(struct file *, off_t *, struct uio *, struct ucred *);
@@ -175,7 +173,7 @@ vn_open(struct nameidata *ndp, int fmode, int cmode)
 		VOP_UNLOCK(vp, 0, p);		/* keep a reference */
 		vp = ndp->ni_vp;		/* for the increment below */
 
-		free(cip, M_TEMP);
+		free(cip, M_TEMP, sizeof(*cip));
 	}
 
 	if (fmode & FWRITE)

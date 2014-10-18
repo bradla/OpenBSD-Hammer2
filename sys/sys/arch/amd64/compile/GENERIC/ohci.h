@@ -1,1 +1,0 @@
-#define	NOHCI	1

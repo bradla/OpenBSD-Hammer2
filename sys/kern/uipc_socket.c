@@ -1,4 +1,4 @@
-/*	$OpenBSD: uipc_socket.c,v 1.127 2014/04/07 10:04:17 mpi Exp $	*/
+/*	$OpenBSD: uipc_socket.c,v 1.133 2014/09/09 02:07:17 guenther Exp $	*/
 /*	$NetBSD: uipc_socket.c,v 1.21 1996/02/04 02:17:52 christos Exp $	*/
 
 /*
@@ -49,7 +49,6 @@
 #include <sys/signalvar.h>
 #include <sys/resourcevar.h>
 #include <net/if.h>
-#include <net/route.h>
 #include <sys/pool.h>
 
 void	sbsync(struct sockbuf *, struct mbuf *);
@@ -436,8 +435,7 @@ restart:
 		}
 		if ((so->so_state & SS_ISCONNECTED) == 0) {
 			if (so->so_proto->pr_flags & PR_CONNREQUIRED) {
-				if ((so->so_state & SS_ISCONFIRMING) == 0 &&
-				    !(resid == 0 && clen != 0))
+				if (!(resid == 0 && clen != 0))
 					snderr(ENOTCONN);
 			} else if (addr == 0)
 				snderr(EDESTADDRREQ);
@@ -641,8 +639,6 @@ bad:
 	}
 	if (mp)
 		*mp = NULL;
-	if (so->so_state & SS_ISCONFIRMING && uio->uio_resid)
-		(*pr->pr_usrreq)(so, PRU_RCVD, NULL, NULL, NULL, curproc);
 
 restart:
 	if ((error = sblock(&so->so_rcv, SBLOCKWAIT(flags))) != 0)
@@ -777,7 +773,7 @@ dontblock:
 				    mtod(cm, struct cmsghdr *)->cmsg_type ==
 				    SCM_RIGHTS)
 				   error = (*pr->pr_domain->dom_externalize)(cm,
-				       controllen);
+				       controllen, flags);
 				*controlp = cm;
 			} else {
 				/*
@@ -1012,8 +1008,8 @@ sorflush(struct socket *so)
 	socantrcvmore(so);
 	sbunlock(sb);
 	asb = *sb;
-	bzero(sb, sizeof (*sb));
-	/* XXX - the bzero stumps all over so_rcv */
+	memset(sb, 0, sizeof (*sb));
+	/* XXX - the memset stomps all over so_rcv */
 	if (asb.sb_flags & SB_KNOTE) {
 		sb->sb_sel.si_note = asb.sb_sel.si_note;
 		sb->sb_flags = SB_KNOTE;
@@ -1064,10 +1060,6 @@ sosplice(struct socket *so, int fd, off_t max, struct timeval *tv)
 	if ((error = getsock(curproc->p_fd, fd, &fp)) != 0)
 		return (error);
 	sosp = fp->f_data;
-
-	if (so->so_state & SS_ISCONFIRMING)
-		(*so->so_proto->pr_usrreq)(so, PRU_RCVD, NULL, NULL, NULL,
-		    curproc);
 
 	/* Lock both receive and send buffer. */
 	if ((error = sblock(&so->so_rcv,
@@ -1312,7 +1304,7 @@ somove(struct socket *so, int wait)
 	m->m_nextpkt = NULL;
 	if (m->m_flags & M_PKTHDR) {
 		m_tag_delete_chain(m);
-		bzero(&m->m_pkthdr, sizeof(m->m_pkthdr));
+		memset(&m->m_pkthdr, 0, sizeof(m->m_pkthdr));
 		m->m_pkthdr.len = len;
 		m->m_pkthdr.pf.prio = IFQ_DEFPRIO;
 	}
@@ -1733,7 +1725,8 @@ sogetopt(struct socket *so, int level, int optname, struct mbuf **mp)
 			int s = splsoftnet();
 
 			m->m_len = sizeof(off_t);
-			*mtod(m, off_t *) = so->so_splicelen;
+			memcpy(mtod(m, off_t *), &so->so_splicelen,
+			    sizeof(off_t));
 			splx(s);
 			break;
 		    }

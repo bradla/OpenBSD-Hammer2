@@ -1,4 +1,4 @@
-/*	$OpenBSD: subr_extent.c,v 1.50 2014/01/21 21:45:58 kettenis Exp $	*/
+/*	$OpenBSD: subr_extent.c,v 1.54 2014/09/14 14:17:25 jsg Exp $	*/
 /*	$NetBSD: subr_extent.c,v 1.7 1996/11/21 18:46:34 cgd Exp $	*/
 
 /*-
@@ -40,7 +40,6 @@
 #include <sys/malloc.h>
 #include <sys/time.h>
 #include <sys/systm.h>
-#include <sys/proc.h>
 #include <sys/queue.h>
 #include <sys/pool.h>
 #include <ddb/db_output.h>
@@ -49,23 +48,30 @@
  * user-land definitions, so it can fit into a testing harness.
  */
 #include <sys/param.h>
-#include <sys/pool.h>
 #include <sys/extent.h>
 #include <sys/queue.h>
 #include <errno.h>
+#include <err.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
 #define	malloc(s, t, flags)		malloc(s)
-#define	free(p, t)			free(p)
+#define	free(p, t, s)			free(p)
+
 #define	tsleep(chan, pri, str, timo)	(EWOULDBLOCK)
 #define	wakeup(chan)			((void)0)
-#define	pool_get(pool, flags)		malloc((pool)->pr_size, 0, 0)
-#define	pool_init(a, b, c, d, e, f, g)	(a)->pr_size = (b)
-#define	pool_setipl(pool, ipl)		/* nothing */
-#define	pool_put(pool, rp)		free((rp), 0)
-#define	panic				printf
+
+struct pool {
+	size_t pr_size;
+};
+
+#define	pool_init(a, b, c, d, e, f, g)	do { (a)->pr_size = (b); } while (0)
+#define	pool_setipl(pp, ipl)		/* nothing */
+#define pool_get(pp, flags)		malloc((pp)->pr_size, 0, 0)
+#define	pool_put(pp, rp)		free((rp), 0, 0)
+
+#define	panic(...)		do { warnx(__VA_ARGS__); abort(); } while (0)
 #endif
 
 #if defined(DIAGNOSTIC) || defined(DDB)
@@ -236,7 +242,7 @@ extent_create(char *name, u_long start, u_long end, int mtype, caddr_t storage,
 		rp = extent_alloc_region_descriptor(ex, flags);
 		if (rp == NULL) {
 			if (!fixed_extent)
-				free(ex, mtype);
+				free(ex, mtype, 0);
 			return (NULL);
 		}
 		rp->er_start = start;
@@ -265,8 +271,7 @@ extent_destroy(struct extent *ex)
 #endif
 
 	/* Free all region descriptors in extent. */
-	for (rp = LIST_FIRST(&ex->ex_regions);
-	    rp != LIST_END(&ex->ex_regions); ) {
+	for (rp = LIST_FIRST(&ex->ex_regions); rp != NULL; ) {
 		orp = rp;
 		rp = LIST_NEXT(rp, er_link);
 		LIST_REMOVE(orp, er_link);
@@ -280,7 +285,7 @@ extent_destroy(struct extent *ex)
 
 	/* If we're not a fixed extent, free the extent descriptor itself. */
 	if ((ex->ex_flags & EXF_FIXED) == 0)
-		free(ex, ex->ex_mtype);
+		free(ex, ex->ex_mtype, 0);
 }
 
 /*
@@ -690,7 +695,7 @@ extent_do_alloc(struct extent *ex, u_long substart, u_long subend,
 	if (last != NULL && last->er_end >= newstart)
 		newstart = extent_align((last->er_end + 1), alignment, skew);
 
-	for (; rp != LIST_END(&ex->ex_regions); rp = LIST_NEXT(rp, er_link)) {
+	for (; rp != NULL; rp = LIST_NEXT(rp, er_link)) {
 		/*
 		 * If the region pasts the subend, bail out and see
 		 * if we fit against the subend.

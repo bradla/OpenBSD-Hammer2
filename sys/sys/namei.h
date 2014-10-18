@@ -178,6 +178,7 @@ struct	namecache {
 	u_long	nc_vpid;		/* capability number of nc_vp */
 	char	nc_nlen;		/* length of name */
 	char	nc_name[NAMECACHE_MAXLEN];	/* segment name */
+	u_short             nc_flag;
 };
 
 #ifdef _KERNEL

@@ -1,4 +1,4 @@
-/*	$OpenBSD: vfs_cluster.c,v 1.40 2013/10/01 20:22:12 sf Exp $	*/
+/*	$OpenBSD: vfs_cluster.c,v 1.43 2014/09/14 14:17:26 jsg Exp $	*/
 /*	$NetBSD: vfs_cluster.c,v 1.12 1996/04/22 01:39:05 christos Exp $	*/
 
 /*
@@ -33,15 +33,12 @@
  */
 
 #include <sys/param.h>
-#include <sys/proc.h>
 #include <sys/buf.h>
 #include <sys/vnode.h>
 #include <sys/mount.h>
 #include <sys/malloc.h>
 #include <sys/systm.h>
 #include <sys/resourcevar.h>
-
-#include <uvm/uvm_extern.h>
 
 void cluster_wbuild(struct vnode *, struct buf *, long, daddr_t, int,
     daddr_t);
@@ -104,7 +101,7 @@ cluster_write(struct buf *bp, struct cluster_info *ci, u_quad_t filesize)
 					for (bpp = buflist->bs_children;
 					    bpp < endbp; bpp++)
 						brelse(*bpp);
-					free(buflist, M_VCLUSTER);
+					free(buflist, M_VCLUSTER, 0);
 					cluster_wbuild(vp, NULL, bp->b_bcount,
 					    ci->ci_cstart, cursize, lbn);
 				} else {
@@ -114,7 +111,7 @@ cluster_write(struct buf *bp, struct cluster_info *ci, u_quad_t filesize)
 					for (bpp = buflist->bs_children;
 					    bpp <= endbp; bpp++)
 						bdwrite(*bpp);
-					free(buflist, M_VCLUSTER);
+					free(buflist, M_VCLUSTER, 0);
 					ci->ci_lastw = lbn;
 					ci->ci_lasta = bp->b_blkno;
 					return;
@@ -241,126 +238,3 @@ cluster_collectbufs(struct vnode *vp, struct cluster_info *ci,
 	buflist->bs_nchildren = i + 1;
 	return (buflist);
 }
-
-
-int
-cluster_read(struct vnode *vp, off_t filesize, off_t loffset, 
-             int blksize, size_t resid, int seqcount, struct buf **bpp)
-{
- /*       struct buf *bp, *rbp, *reqbp;
-        off_t origoffset;
-        off_t doffset;
-*/
-        int error;
-/*        int i;
-        int maxra, racluster;
-*/
-        int totread;
-
-        error = 0;
-        totread = (resid > INT_MAX) ? INT_MAX : (int)resid;
-
-        /*
-         * racluster - calculate maximum cluster IO size (limited by
-         *             backing block device).
-         *
-         * Try to limit the amount of read-ahead by a few ad-hoc parameters.
-         * This needs work!!!
-         *
-         * NOTE!  The BMAP operations may involve synchronous I/O so we
-         *        really want several cluster IOs in progress to absorb
-         *        the time lag.
-         */
-
-	return 0;
-}
-
-/*
-* This version of bread issues any required I/O asyncnronously and
-* makes a callback on completion.
-*
-* The callback must check whether BIO_DONE is set in the bio and issue
-* the bpdone(bp, 0) if it isn't.  The callback is responsible for clearing
-* BIO_DONE and disposing of the I/O (bqrelse()ing it).
-*/
-void
-breadcb(struct vnode *vp, off_t loffset, int size,
-         void (*func)(struct bio *), void *arg)
-{
-       struct buf *bp;
- 
-       bp = getblk(vp, loffset, size, 0, 0);
- 
-       /* if not found in cache, do some I/O */
-        if ((bp->b_flags & B_CACHE) == 0) {
-               bp->b_flags &= ~(B_ERROR | B_EINTR | B_INVAL);
-               //bp->b_cmd = BUF_CMD_READ;
-               //bp->b_bio1.bio_done = func;
-               //bp->b_bio1.bio_caller_info1.ptr = arg;
-               //vfs_busy_pages(vp, bp);
-               //BUF_KERNPROC(bp);
-               //vn_strategy(vp, &bp->b_bio1);
-        } else if (func) {
-               /*
-                * Since we are issuing the callback synchronously it cannot
-                * race the BIO_DONE, so no need for atomic ops here.
-                */
-                //bp->b_bio1.bio_caller_info1.ptr = arg;
-                //bp->b_bio1.bio_flags |= BIO_DONE;
-                //func(&bp->b_bio1);
-         } else {
-		printf("please fix...\n");
-                //bqrelse(bp);
-         }
-}
-
- /*
-  * This replaces breadcb(), providing an asynchronous read of the requested
-  * buffer with a callback, plus an asynchronous read-ahead within the
-  * specified bounds.
-  *
-  * The callback must check whether BIO_DONE is set in the bio and issue
-  * the bpdone(bp, 0) if it isn't.  The callback is responsible for clearing
-  * BIO_DONE and disposing of the I/O (bqrelse()ing it).
-  *
-  * filesize     - read-ahead @ blksize will not cross this boundary
-  * loffset      - loffset for returned *bpp
-  * blksize      - blocksize for returned *bpp and read-ahead bps
-  * minreq       - minimum (not a hard minimum) in bytes, typically reflects
-  *                a higher level uio resid.
-  * maxreq       - maximum (sequential heuristic) in bytes (highet typ ~2MB)
-  * bpp          - return buffer (*bpp) for (loffset,blksize)
-  */
- void
- cluster_readcb(struct vnode *vp, off_t filesize, off_t loffset,
-               int blksize, size_t minreq, size_t maxreq,
-               void (*func)(struct bio *), void *arg)
- {
-   /*      struct buf *bp, *rbp, *reqbp;
-         off_t origoffset;
-         off_t doffset;
-         int i;
-         int maxra;
-         int maxrbuild;
-*/
-  
-         /*
-          * Calculate the desired read-ahead in blksize'd blocks (maxra).
-          * To do this we calculate maxreq.
-          *
-          * maxreq typically starts out as a sequential heuristic.  If the
-          * high level uio/resid is bigger (minreq), we pop maxreq up to
-          * minreq.  This represents the case where random I/O is being
-          * performed by the userland is issuing big read()'s.
-          *
-          * Then we limit maxreq to max_readahead to ensure it is a reasonable
-          * value.
-          *
-          * Finally we must ensure that (loffset + maxreq) does not cross the
-          * boundary (filesize) for the current blocksize.  If we allowed it
-          * to cross we could end up with buffers past the boundary with the
-          * wrong block size (HAMMER large-data areas use mixed block sizes).
-          * minreq is also absolutely limited to filesize.
-          */
-}
-

@@ -1,4 +1,4 @@
-/*	$OpenBSD: vfs_subr.c,v 1.213 2014/04/10 13:48:24 tedu Exp $	*/
+/*	$OpenBSD: vfs_subr.c,v 1.219 2014/09/13 16:06:37 doug Exp $	*/
 /*	$NetBSD: vfs_subr.c,v 1.53 1996/04/22 01:39:13 christos Exp $	*/
 
 /*
@@ -44,6 +44,7 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/proc.h>
+#include <sys/sysctl.h>
 #include <sys/mount.h>
 #include <sys/time.h>
 #include <sys/fcntl.h>
@@ -56,15 +57,17 @@
 #include <sys/buf.h>
 #include <sys/errno.h>
 #include <sys/malloc.h>
-#include <sys/domain.h>
 #include <sys/mbuf.h>
 #include <sys/syscallargs.h>
 #include <sys/pool.h>
 #include <sys/tree.h>
 #include <sys/specdev.h>
 
-#include <uvm/uvm_extern.h>
-#include <sys/sysctl.h>
+#include <netinet/in.h>
+
+#include "softraid.h"
+
+void sr_shutdown(void);
 
 enum vtype iftovt_tab[16] = {
 	VNON, VFIFO, VCHR, VNON, VDIR, VNON, VBLK, VNON,
@@ -1063,7 +1066,7 @@ vgonel(struct vnode *vp, struct proc *p)
 				vx->v_flag &= ~VALIASED;
 			vp->v_flag &= ~VALIASED;
 		}
-		free(vp->v_specinfo, M_VNODE);
+		free(vp->v_specinfo, M_VNODE, sizeof(struct specinfo));
 		vp->v_specinfo = NULL;
 	}
 	/*
@@ -1278,7 +1281,7 @@ vfs_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		ret = sysctl_rdstruct(oldp, oldlenp, newp, tmpvfsp,
 		    sizeof(struct vfsconf));
 
-		free(tmpvfsp, M_TEMP);
+		free(tmpvfsp, M_TEMP, sizeof(*tmpvfsp));
 		return (ret);
 	case VFS_BCACHESTAT:	/* buffer cache statistics */
 		ret = sysctl_rdstruct(oldp, oldlenp, newp, &bcstats,
@@ -1390,7 +1393,6 @@ vfs_hang_addrlist(struct mount *mp, struct netexport *nep,
 	int i;
 	struct radix_node *rn;
 	struct sockaddr *saddr, *smask = 0;
-	struct domain *dom;
 	int error;
 
 	if (argp->ex_addrlen == 0) {
@@ -1420,25 +1422,20 @@ vfs_hang_addrlist(struct mount *mp, struct netexport *nep,
 			smask->sa_len = argp->ex_masklen;
 	}
 	i = saddr->sa_family;
-	if (i < 0 || i > AF_MAX) {
+	switch (i) {
+	case AF_INET:
+		if ((rnh = nep->ne_rtable_inet) == NULL) {
+			if (!rn_inithead((void **)&nep->ne_rtable_inet,
+			    offsetof(struct sockaddr_in, sin_addr) * 8)) {
+				error = ENOBUFS;
+				goto out;
+			}
+			rnh = nep->ne_rtable_inet;
+		}
+		break;
+	default:
 		error = EINVAL;
 		goto out;
-	}
-	if ((rnh = nep->ne_rtable[i]) == 0) {
-		/*
-		 * Seems silly to initialize every AF when most are not
-		 * used, do so on demand here
-		 */
-		for (dom = domains; dom; dom = dom->dom_next)
-			if (dom->dom_family == i && dom->dom_rtattach) {
-				dom->dom_rtattach((void **)&nep->ne_rtable[i],
-					dom->dom_rtoffset);
-				break;
-			}
-		if ((rnh = nep->ne_rtable[i]) == 0) {
-			error = ENOBUFS;
-			goto out;
-		}
 	}
 	rn = (*rnh->rnh_addaddr)((caddr_t)saddr, (caddr_t)smask, rnh,
 		np->netc_rnodes, 0);
@@ -1452,7 +1449,7 @@ finish:
 	crfromxucred(&np->netc_anon, &argp->ex_anon);
 	return (0);
 out:
-	free(np, M_NETADDR);
+	free(np, M_NETADDR, 0);
 	return (error);
 }
 
@@ -1463,7 +1460,7 @@ vfs_free_netcred(struct radix_node *rn, void *w, u_int id)
 	struct radix_node_head *rnh = (struct radix_node_head *)w;
 
 	(*rnh->rnh_deladdr)(rn->rn_key, rn->rn_mask, rnh, NULL);
-	free(rn, M_NETADDR);
+	free(rn, M_NETADDR, 0);
 	return (0);
 }
 
@@ -1473,15 +1470,13 @@ vfs_free_netcred(struct radix_node *rn, void *w, u_int id)
 void
 vfs_free_addrlist(struct netexport *nep)
 {
-	int i;
 	struct radix_node_head *rnh;
 
-	for (i = 0; i <= AF_MAX; i++)
-		if ((rnh = nep->ne_rtable[i]) != NULL) {
-			(*rnh->rnh_walktree)(rnh, vfs_free_netcred, rnh);
-			free(rnh, M_RTABLE);
-			nep->ne_rtable[i] = 0;
-		}
+	if ((rnh = nep->ne_rtable_inet) != NULL) {
+		(*rnh->rnh_walktree)(rnh, vfs_free_netcred, rnh);
+		free(rnh, M_RTABLE, 0);
+		nep->ne_rtable_inet = NULL;
+	}
 }
 
 int
@@ -1515,7 +1510,14 @@ vfs_export_lookup(struct mount *mp, struct netexport *nep, struct mbuf *nam)
 		 */
 		if (nam != NULL) {
 			saddr = mtod(nam, struct sockaddr *);
-			rnh = nep->ne_rtable[saddr->sa_family];
+			switch(saddr->sa_family) {
+			case AF_INET:
+				rnh = nep->ne_rtable_inet;
+				break;
+			default:
+				rnh = NULL;
+				break;
+			}
 			if (rnh != NULL) {
 				np = (struct netcred *)
 					(*rnh->rnh_matchaddr)((caddr_t)saddr,
@@ -1647,6 +1649,10 @@ vfs_shutdown(void)
 		printf("giving up\n");
 	else
 		printf("done\n");
+
+#if NSOFTRAID > 0
+	sr_shutdown();
+#endif
 }
 
 /*
@@ -1881,8 +1887,7 @@ vflushbuf(struct vnode *vp, int sync)
 
 loop:
 	s = splbio();
-	for (bp = LIST_FIRST(&vp->v_dirtyblkhd);
-	    bp != LIST_END(&vp->v_dirtyblkhd); bp = nbp) {
+	for (bp = LIST_FIRST(&vp->v_dirtyblkhd); bp != NULL; bp = nbp) {
 		nbp = LIST_NEXT(bp, b_vnbufs);
 		if ((bp->b_flags & B_BUSY))
 			continue;

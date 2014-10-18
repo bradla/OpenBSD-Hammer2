@@ -1,4 +1,22 @@
 
+* Currently the check code (bref.methods / crc, sha, etc) is being checked
+  every single blasted time a chain is locked, even if the underlying buffer
+  was previously checked for that chain.  This needs an optimization to
+  (significantly) improve performance.
+
+* flush synchronization boundary crossing check and current flush chain
+  interlock needed.
+
+* snapshot creation must allocate and separately pass a new pmp for the pfs
+  degenerate 'cluster' representing the snapshot.  This theoretically will
+  also allow a snapshot to be generated inside a cluster of more than one
+  node.
+
+* snapshot copy currently also copies uuids and can confuse cluster code
+
+* hidden dir or other dirs/files/modifications made to PFS before
+  additional cluster entries added.
+
 * transaction on cluster - multiple trans structures, subtrans
 
 * inode always contains target cluster/chain, not hardlink

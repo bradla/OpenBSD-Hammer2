@@ -1,4 +1,4 @@
-/*	$OpenBSD: vfs_syscalls.c,v 1.205 2014/04/12 14:18:11 espie Exp $	*/
+/*	$OpenBSD: vfs_syscalls.c,v 1.209 2014/09/18 02:15:04 uebayasi Exp $	*/
 /*	$NetBSD: vfs_syscalls.c,v 1.71 1996/04/23 10:29:02 mycroft Exp $	*/
 
 /*
@@ -42,6 +42,7 @@
 #include <sys/namei.h>
 #include <sys/filedesc.h>
 #include <sys/kernel.h>
+#include <sys/sysctl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/vnode.h>
@@ -56,9 +57,6 @@
 #include <sys/ktrace.h>
 
 #include <sys/syscallargs.h>
-
-#include <uvm/uvm_extern.h>
-#include <sys/sysctl.h>
 
 extern int suid_clear;
 int	usermount = 0;		/* sysctl: by default, users may not mount */
@@ -306,7 +304,7 @@ update:
 	} else {
 		mp->mnt_vnodecovered->v_mountedhere = NULL;
 		vfs_unbusy(mp);
-		free(mp, M_MOUNT);
+		free(mp, M_MOUNT, 0);
 		vput(vp);
 	}
 	return (error);
@@ -456,7 +454,7 @@ dounmount(struct mount *mp, int flags, struct proc *p, struct vnode *olddp)
 		panic("unmount: dangling vnode");
 
 	vfs_unbusy(mp);
-	free(mp, M_MOUNT);
+	free(mp, M_MOUNT, 0);
 
 	return (0);
 }
@@ -1602,11 +1600,11 @@ sys_access(struct proc *p, void *v, register_t *retval)
 {
 	struct sys_access_args /* {
 		syscallarg(const char *) path;
-		syscallarg(int) flags;
+		syscallarg(int) amode;
 	} */ *uap = v;
 
 	return (dofaccessat(p, AT_FDCWD, SCARG(uap, path),
-	    SCARG(uap, flags), 0));
+	    SCARG(uap, amode), 0));
 }
 
 int
@@ -1627,31 +1625,38 @@ int
 dofaccessat(struct proc *p, int fd, const char *path, int amode, int flag)
 {
 	struct vnode *vp;
-	int error;
+	struct ucred *newcred, *oldcred;
 	struct nameidata nd;
+	int error;
 
 	if (amode & ~(R_OK | W_OK | X_OK))
 		return (EINVAL);
 	if (flag & ~AT_EACCESS)
 		return (EINVAL);
 
+	newcred = NULL;
+	oldcred = p->p_ucred;
+
+	/*
+	 * If access as real ids was requested and they really differ,
+	 * give the thread new creds with them reset
+	 */
+	if ((flag & AT_EACCESS) == 0 &&
+	    (oldcred->cr_uid != oldcred->cr_ruid ||
+	    (oldcred->cr_gid != oldcred->cr_rgid))) {
+		p->p_ucred = newcred = crdup(oldcred);
+		newcred->cr_uid = newcred->cr_ruid;
+		newcred->cr_gid = newcred->cr_rgid;
+	}
+
 	NDINITAT(&nd, LOOKUP, FOLLOW | LOCKLEAF, UIO_USERSPACE, fd, path, p);
 	if ((error = namei(&nd)) != 0)
-		return (error);
+		goto out;
 	vp = nd.ni_vp;
 
 	/* Flags == 0 means only check for existence. */
 	if (amode) {
-		struct ucred *cred = p->p_ucred;
 		int vflags = 0;
-
-		crhold(cred);
-
-		if (!(flag & AT_EACCESS)) {
-			cred = crcopy(cred);
-			cred->cr_uid = cred->cr_ruid;
-			cred->cr_gid = cred->cr_rgid;
-		}
 
 		if (amode & R_OK)
 			vflags |= VREAD;
@@ -1660,13 +1665,16 @@ dofaccessat(struct proc *p, int fd, const char *path, int amode, int flag)
 		if (amode & X_OK)
 			vflags |= VEXEC;
 
-		error = VOP_ACCESS(vp, vflags, cred, p);
+		error = VOP_ACCESS(vp, vflags, p->p_ucred, p);
 		if (!error && (vflags & VWRITE))
 			error = vn_writechk(vp);
-
-		crfree(cred);
 	}
 	vput(vp);
+out:
+	if (newcred != NULL) {
+		p->p_ucred = oldcred;
+		crfree(newcred);
+	}
 	return (error);
 }
 

@@ -41,13 +41,6 @@
  */
 
 #include "hammer2.h"
-#include "hammer2_chain.h"
-#include "hammer2_subr.h"
-#include "hammer2_cluster.h"
-#include "hammer2_trans.h"
-#include "hammer2_vfsops.h"
-#include "hammer2_vnops.h"
-#include "hammer2_ioctl.h"
 
 #define PRIV_HAMMER_IOCTL        650     /* can hammer_ioctl(). */
 #define NULL_CRED_OKAY  0x2
@@ -67,49 +60,43 @@ static int hammer2_ioctl_pfs_snapshot(hammer2_inode_t *ip, void *data);
 static int hammer2_ioctl_pfs_delete(hammer2_inode_t *ip, void *data);
 static int hammer2_ioctl_inode_get(hammer2_inode_t *ip, void *data);
 static int hammer2_ioctl_inode_set(hammer2_inode_t *ip, void *data);
+static int hammer2_ioctl_debug_dump(hammer2_inode_t *ip);
 //static int hammer2_ioctl_inode_comp_set(hammer2_inode_t *ip, void *data);
 //static int hammer2_ioctl_inode_comp_rec_set(hammer2_inode_t *ip, void *data);
 //static int hammer2_ioctl_inode_comp_rec_set2(hammer2_inode_t *ip, void *data);
-int priv_check_cred(struct ucred *cred, int priv, int flags);
-int prison_priv_check(struct ucred *cred, int priv);
-//struct file * holdfp(struct filedesc *fdp, int fd, int flag);
+
+int priv_check_cred(struct ucred *cred, int, int);
 
 /*
- * Check if permisson for a specific privilege is granted within jail.
+ * Check a credential for privilege.
+ *
+ * A non-null credential is expected unless NULL_CRED_OKAY is set.
  */
 int
-prison_priv_check(struct ucred *cred, int priv)
-{
-         //if (!jailed(cred))
-          //       return (0);
-
-         return (EPERM);
-}
-
-int 
 priv_check_cred(struct ucred *cred, int priv, int flags)
 {
 	int error;
-   
-        //KASSERT(PRIV_VALID(priv), ("priv_check_cred: invalid privilege"));
-        KASSERT(cred != NULL || (flags & NULL_CRED_OKAY),
-                  ("priv_check_cred: NULL cred!"));
-  
-        if (cred == NULL) {
-              if (flags & NULL_CRED_OKAY)
-              	return (0);
-              else
+
+	//KASSERT(PRIV_VALID(priv), ("priv_check_cred: invalid privilege"));
+
+	KASSERT(cred != NULL || (flags & NULL_CRED_OKAY),
+		("priv_check_cred: NULL cred!"));
+
+	if (cred == NULL) {
+		if (flags & NULL_CRED_OKAY)
+			return (0);
+		else
+			return (EPERM);
+	}
+	if (cred->cr_uid != 0) 
 		return (EPERM);
-        }
-        if (cred->cr_uid != 0) 
-            return (EPERM);
 
-        error = prison_priv_check(cred, priv);
-        if (error)
-              return (error);
+	// error = prison_priv_check(cred, priv);
+	if (error)
+		return (error);
 
-        /* NOTE: accounting for suser access (p_acflag/ASU) removed */
-        return (0);
+	/* NOTE: accounting for suser access (p_acflag/ASU) removed */
+	return (0);
 }
 
 int
@@ -192,6 +179,9 @@ hammer2_ioctl(hammer2_inode_t *ip, u_long com, void *data, int fflag,
 	case HAMMER2IOC_INODE_COMP_REC_SET2:
 		error = hammer2_ioctl_inode_comp_rec_set2(ip, data);
 		break;*/
+	case HAMMER2IOC_DEBUG_DUMP:
+		error = hammer2_ioctl_debug_dump(ip);
+		break;
 	default:
 		error = EOPNOTSUPP;
 		break;
@@ -205,57 +195,70 @@ hammer2_ioctl(hammer2_inode_t *ip, u_long com, void *data, int fflag,
 static int
 hammer2_ioctl_version_get(hammer2_inode_t *ip, void *data)
 {
-	hammer2_mount_t *hmp = ip->pmp->cluster.focus->hmp;
+	hammer2_mount_t *hmp = ip->pmp->iroot->cluster.focus->hmp;
 	hammer2_ioc_version_t *version = data;
 
 	version->version = hmp->voldata.version;
 	return 0;
 }
 
-/*
- * Retrieve and reference the file pointer associated with a descriptor.
- *
- * MPSAFE
- */
-/*
+void
+fhold(struct file *fp)
+{
+	//atomic_add_int((unsigned int)&fp->f_count, 1);
+	fp->f_count++;
+}
+
 struct file *
 holdfp(struct filedesc *fdp, int fd, int flag)
 {
-        struct file* fp;
+	struct file* fp;
+	int nfiles=0;
 
-        if (((u_int)fd) >= fdp->fd_nfiles) {
+//	__mp_lock((struct __mp_lock *)&fdp->fd_spin);
+	//nfiles = fdp->fd_nfiles;
+        if (fd >= nfiles) {
                 fp = NULL;
                 goto done;
         }
-        if ((fp = fdp->fd_files[fd].fp) == NULL)
-                goto done;
+        //if ((fp = fdp->fd_files[fd].fp) == NULL)
+         //       goto done;
         if ((fp->f_flag & flag) == 0 && flag != -1) {
                 fp = NULL;
                 goto done;
         }
-	
         fhold(fp);
 done:
+      //__mp_unlock((struct __mp_lock *)&fdp->fd_spin);
         return (fp);
 }
-*/
-
 
 static int
 hammer2_ioctl_recluster(hammer2_inode_t *ip, void *data)
 {
-	// XXX hammer2_ioc_recluster_t *recl = data;
+	hammer2_ioc_recluster_t *recl = data;
 	struct file *fp;
+	hammer2_cluster_t *cluster;
+	int error;
 
-	// XXX fp = holdfp(curproc->p_fd, recl->fd, -1);
-	
+	struct filedesc *p;
+
+	fp = holdfp(p, recl->fd, -1);
 	if (fp) {
-		printf("reconnect to cluster\n");
-		hammer2_cluster_reconnect(ip->pmp, fp);
-		return 0;
+		printf("reconnect to cluster: ");
+		cluster = &ip->pmp->iroot->cluster;
+		if (cluster->nchains != 1 || cluster->focus == NULL) {
+			printf("not a local device mount\n");
+			error = EINVAL;
+		} else {
+			hammer2_cluster_reconnect(cluster->focus->hmp, fp);
+			printf("ok\n");
+			error = 0;
+		}
 	} else {
-		return EINVAL;
+		error = EINVAL;
 	}
+	return error;
 }
 
 /*
@@ -264,7 +267,7 @@ hammer2_ioctl_recluster(hammer2_inode_t *ip, void *data)
 static int
 hammer2_ioctl_remote_scan(hammer2_inode_t *ip, void *data)
 {
-	hammer2_mount_t *hmp = ip->pmp->cluster.focus->hmp;
+	hammer2_mount_t *hmp = ip->pmp->iroot->cluster.focus->hmp;
 	hammer2_ioc_remote_t *remote = data;
 	int copyid = remote->copyid;
 
@@ -273,7 +276,7 @@ hammer2_ioctl_remote_scan(hammer2_inode_t *ip, void *data)
 
 	hammer2_voldata_lock(hmp);
 	remote->copy1 = hmp->voldata.copyinfo[copyid];
-	hammer2_voldata_unlock(hmp, 0);
+	hammer2_voldata_unlock(hmp);
 
 	/*
 	 * Adjust nextid (GET only)
@@ -305,7 +308,7 @@ hammer2_ioctl_remote_add(hammer2_inode_t *ip, void *data)
 	if (copyid >= HAMMER2_COPYID_COUNT)
 		return (EINVAL);
 
-	hmp = pmp->cluster.focus->hmp; /* XXX */
+	hmp = pmp->iroot->cluster.focus->hmp; /* XXX */
 	hammer2_voldata_lock(hmp);
 	if (copyid < 0) {
 		for (copyid = 1; copyid < HAMMER2_COPYID_COUNT; ++copyid) {
@@ -317,12 +320,12 @@ hammer2_ioctl_remote_add(hammer2_inode_t *ip, void *data)
 			goto failed;
 		}
 	}
-	hammer2_modify_volume(hmp);
+	hammer2_voldata_modify(hmp);
 	remote->copy1.copyid = copyid;
 	hmp->voldata.copyinfo[copyid] = remote->copy1;
-	hammer2_volconf_update(pmp, copyid);
+	hammer2_volconf_update(hmp, copyid);
 failed:
-	hammer2_voldata_unlock(hmp, 1);
+	hammer2_voldata_unlock(hmp);
 	return (error);
 }
 
@@ -338,7 +341,7 @@ hammer2_ioctl_remote_del(hammer2_inode_t *ip, void *data)
 	int copyid = remote->copyid;
 	int error = 0;
 
-	hmp = pmp->cluster.focus->hmp; /* XXX */
+	hmp = pmp->iroot->cluster.focus->hmp; /* XXX */
 	if (copyid >= HAMMER2_COPYID_COUNT)
 		return (EINVAL);
 	remote->copy1.path[sizeof(remote->copy1.path) - 1] = 0;
@@ -357,11 +360,11 @@ hammer2_ioctl_remote_del(hammer2_inode_t *ip, void *data)
 			goto failed;
 		}
 	}
-	hammer2_modify_volume(hmp);
+	hammer2_voldata_modify(hmp);
 	hmp->voldata.copyinfo[copyid].copyid = 0;
-	hammer2_volconf_update(pmp, copyid);
+	hammer2_volconf_update(hmp, copyid);
 failed:
-	hammer2_voldata_unlock(hmp, 1);
+	hammer2_voldata_unlock(hmp);
 	return (error);
 }
 
@@ -375,14 +378,15 @@ hammer2_ioctl_remote_rep(hammer2_inode_t *ip, void *data)
 	hammer2_mount_t *hmp;
 	int copyid = remote->copyid;
 
-	hmp = ip->pmp->cluster.focus->hmp; /* XXX */
+	hmp = ip->pmp->iroot->cluster.focus->hmp; /* XXX */
 
 	if (copyid < 0 || copyid >= HAMMER2_COPYID_COUNT)
 		return (EINVAL);
 
 	hammer2_voldata_lock(hmp);
-	/*hammer2_volconf_update(pmp, copyid);*/
-	hammer2_voldata_unlock(hmp, 1);
+	hammer2_voldata_modify(hmp);
+	/*hammer2_volconf_update(hmp, copyid);*/
+	hammer2_voldata_unlock(hmp);
 
 	return(0);
 }
@@ -406,12 +410,12 @@ hammer2_ioctl_socket_set(hammer2_inode_t *ip, void *data)
 	hammer2_mount_t *hmp;
 	int copyid = remote->copyid;
 
-	hmp = ip->pmp->cluster.focus->hmp; /* XXX */
+	hmp = ip->pmp->iroot->cluster.focus->hmp; /* XXX */
 	if (copyid < 0 || copyid >= HAMMER2_COPYID_COUNT)
 		return (EINVAL);
 
 	hammer2_voldata_lock(hmp);
-	hammer2_voldata_unlock(hmp, 0);
+	hammer2_voldata_unlock(hmp);
 
 	return(0);
 }
@@ -430,7 +434,7 @@ hammer2_ioctl_socket_set(hammer2_inode_t *ip, void *data)
 static int
 hammer2_ioctl_pfs_get(hammer2_inode_t *ip, void *data)
 {
-	hammer2_inode_data_t *ipdata;
+	const hammer2_inode_data_t *ipdata;
 	hammer2_mount_t *hmp;
 	hammer2_ioc_pfs_t *pfs;
 	hammer2_cluster_t *cparent;
@@ -441,9 +445,9 @@ hammer2_ioctl_pfs_get(hammer2_inode_t *ip, void *data)
 	int ddflag;
 
 	error = 0;
-	hmp = ip->pmp->cluster.focus->hmp; /* XXX */
+	hmp = ip->pmp->iroot->cluster.focus->hmp; /* XXX */
 	pfs = data;
-	cparent = hammer2_inode_lock_ex(hmp->sroot);
+	cparent = hammer2_inode_lock_ex(hmp->spmp->iroot);
 	rcluster = hammer2_inode_lock_ex(ip->pmp->iroot);
 
 	/*
@@ -510,7 +514,7 @@ hammer2_ioctl_pfs_get(hammer2_inode_t *ip, void *data)
 		pfs->name_next = (hammer2_key_t)-1;
 		error = ENOENT;
 	}
-	hammer2_inode_unlock_ex(hmp->sroot, cparent);
+	hammer2_inode_unlock_ex(hmp->spmp->iroot, cparent);
 
 	return (error);
 }
@@ -521,7 +525,7 @@ hammer2_ioctl_pfs_get(hammer2_inode_t *ip, void *data)
 static int
 hammer2_ioctl_pfs_lookup(hammer2_inode_t *ip, void *data)
 {
-	hammer2_inode_data_t *ipdata;
+	const hammer2_inode_data_t *ipdata;
 	hammer2_mount_t *hmp;
 	hammer2_ioc_pfs_t *pfs;
 	hammer2_cluster_t *cparent;
@@ -533,9 +537,9 @@ hammer2_ioctl_pfs_lookup(hammer2_inode_t *ip, void *data)
 	size_t len;
 
 	error = 0;
-	hmp = ip->pmp->cluster.focus->hmp; /* XXX */
+	hmp = ip->pmp->iroot->cluster.focus->hmp; /* XXX */
 	pfs = data;
-	cparent = hammer2_inode_lock_sh(hmp->sroot);
+	cparent = hammer2_inode_lock_sh(hmp->spmp->iroot);
 
 	pfs->name[sizeof(pfs->name) - 1] = 0;
 	len = strlen(pfs->name);
@@ -574,7 +578,7 @@ hammer2_ioctl_pfs_lookup(hammer2_inode_t *ip, void *data)
 	} else {
 		error = ENOENT;
 	}
-	hammer2_inode_unlock_sh(hmp->sroot, cparent);
+	hammer2_inode_unlock_sh(hmp->spmp->iroot, cparent);
 
 	return (error);
 }
@@ -593,7 +597,7 @@ hammer2_ioctl_pfs_create(hammer2_inode_t *ip, void *data)
 	hammer2_trans_t trans;
 	int error;
 
-	hmp = ip->pmp->cluster.focus->hmp; /* XXX */
+	hmp = ip->pmp->iroot->cluster.focus->hmp; /* XXX */
 	pfs = data;
 	nip = NULL;
 
@@ -601,13 +605,12 @@ hammer2_ioctl_pfs_create(hammer2_inode_t *ip, void *data)
 		return(EINVAL);
 	pfs->name[sizeof(pfs->name) - 1] = 0;	/* ensure 0-termination */
 
-	hammer2_trans_init(&trans, ip->pmp, NULL, HAMMER2_TRANS_NEWINODE);
-	nip = hammer2_inode_create(&trans, hmp->sroot, NULL, NULL,
+	hammer2_trans_init(&trans, ip->pmp, HAMMER2_TRANS_NEWINODE);
+	nip = hammer2_inode_create(&trans, hmp->spmp->iroot, NULL, NULL,
 				     pfs->name, strlen(pfs->name),
 				     &ncluster, &error);
 	if (error == 0) {
-		nipdata = hammer2_cluster_modify_ip(&trans, nip, ncluster,
-						  HAMMER2_MODIFY_ASSERTNOCOPY);
+		nipdata = hammer2_cluster_modify_ip(&trans, nip, ncluster, 0);
 		nipdata->pfs_type = pfs->pfs_type;
 		nipdata->pfs_clid = pfs->pfs_clid;
 		nipdata->pfs_fsid = pfs->pfs_fsid;
@@ -617,7 +620,9 @@ hammer2_ioctl_pfs_create(hammer2_inode_t *ip, void *data)
 		 * "boot", the boot loader can't decompress (yet).
 		 */
 		if (strcmp(pfs->name, "boot") == 0)
-			nipdata->comp_algo = HAMMER2_COMP_AUTOZERO;
+			nipdata->comp_algo = HAMMER2_ENC_ALGO(
+							HAMMER2_COMP_AUTOZERO);
+		hammer2_cluster_modsync(ncluster);
 		hammer2_inode_unlock_ex(nip, ncluster);
 	}
 	hammer2_trans_done(&trans);
@@ -636,11 +641,11 @@ hammer2_ioctl_pfs_delete(hammer2_inode_t *ip, void *data)
 	hammer2_trans_t trans;
 	int error;
 
-	hmp = ip->pmp->cluster.focus->hmp; /* XXX */
-	hammer2_trans_init(&trans, ip->pmp, NULL, 0);
-	error = hammer2_unlink_file(&trans, hmp->sroot,
+	hmp = ip->pmp->iroot->cluster.focus->hmp; /* XXX */
+	hammer2_trans_init(&trans, ip->pmp, 0);
+	error = hammer2_unlink_file(&trans, hmp->spmp->iroot,
 				    pfs->name, strlen(pfs->name),
-				    2, NULL, NULL);
+				    2, NULL, NULL, -1);
 	hammer2_trans_done(&trans);
 
 	return (error);
@@ -661,7 +666,8 @@ hammer2_ioctl_pfs_snapshot(hammer2_inode_t *ip, void *data)
 
 	hammer2_vfs_sync(ip->pmp->mp, MNT_WAIT);
 
-	hammer2_trans_init(&trans, ip->pmp, NULL, HAMMER2_TRANS_NEWINODE);
+	hammer2_trans_init(&trans, ip->pmp,
+			   HAMMER2_TRANS_ISFLUSH | HAMMER2_TRANS_NEWINODE);
 	cparent = hammer2_inode_lock_ex(ip);
 	error = hammer2_cluster_snapshot(&trans, cparent, pfs);
 	hammer2_inode_unlock_ex(ip, cparent);
@@ -676,9 +682,11 @@ hammer2_ioctl_pfs_snapshot(hammer2_inode_t *ip, void *data)
 static int
 hammer2_ioctl_inode_get(hammer2_inode_t *ip, void *data)
 {
-	hammer2_ioc_inode_t *ino = data;
-	hammer2_inode_data_t *ipdata;
+	const hammer2_inode_data_t *ipdata;
+	hammer2_ioc_inode_t *ino;
 	hammer2_cluster_t *cparent;
+
+	ino = data;
 
 	cparent = hammer2_inode_lock_sh(ip);
 	ipdata = &hammer2_cluster_data(cparent)->ipdata;
@@ -696,19 +704,31 @@ hammer2_ioctl_inode_get(hammer2_inode_t *ip, void *data)
 static int
 hammer2_ioctl_inode_set(hammer2_inode_t *ip, void *data)
 {
-	hammer2_inode_data_t *ipdata;
+	const hammer2_inode_data_t *ripdata;
+	hammer2_inode_data_t *wipdata;
 	hammer2_ioc_inode_t *ino = data;
 	hammer2_cluster_t *cparent;
 	hammer2_trans_t trans;
 	int error = 0;
+	int dosync = 0;
 
-	hammer2_trans_init(&trans, ip->pmp, NULL, 0);
+	hammer2_trans_init(&trans, ip->pmp, 0);
 	cparent = hammer2_inode_lock_ex(ip);
-	ipdata = &hammer2_cluster_data(cparent)->ipdata;
+	ripdata = &hammer2_cluster_data(cparent)->ipdata;
 
-	if (ino->ip_data.comp_algo != ipdata->comp_algo) {
-		ipdata = hammer2_cluster_modify_ip(&trans, ip, cparent, 0);
-		ipdata->comp_algo = ino->ip_data.comp_algo;
+	if (ino->ip_data.check_algo != ripdata->check_algo) {
+		wipdata = hammer2_cluster_modify_ip(&trans, ip, cparent, 0);
+		wipdata->check_algo = ino->ip_data.check_algo;
+		ripdata = wipdata; /* safety */
+		hammer2_cluster_setmethod_check(&trans, cparent,
+						wipdata->check_algo);
+		dosync = 1;
+	}
+	if (ino->ip_data.comp_algo != ripdata->comp_algo) {
+		wipdata = hammer2_cluster_modify_ip(&trans, ip, cparent, 0);
+		wipdata->comp_algo = ino->ip_data.comp_algo;
+		ripdata = wipdata; /* safety */
+		dosync = 1;
 	}
 	ino->kdata = ip;
 	
@@ -719,8 +739,27 @@ hammer2_ioctl_inode_set(hammer2_inode_t *ip, void *data)
 	}
 	if (ino->flags & HAMMER2IOC_INODE_FLAG_COPIES) {
 	}
+	if (dosync)
+		hammer2_cluster_modsync(cparent);
 	hammer2_trans_done(&trans);
 	hammer2_inode_unlock_ex(ip, cparent);
 
 	return (error);
+}
+
+static
+int
+hammer2_ioctl_debug_dump(hammer2_inode_t *ip)
+{
+	hammer2_chain_t *chain;
+	int count = 1000;
+	int i;
+
+	for (i = 0; i < ip->cluster.nchains; ++i) {
+		chain = ip->cluster.array[i];
+		if (chain == NULL)
+			continue;
+		hammer2_dump_chain(chain, 0, &count, 'i');
+	}
+	return 0;
 }

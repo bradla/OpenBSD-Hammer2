@@ -1,6 +1,7 @@
+/*	$OpenBSD: kern_uuid.c,v 1.2 2014/08/31 20:15:54 miod Exp $	*/
 /*	$NetBSD: kern_uuid.c,v 1.18 2011/11/19 22:51:25 tls Exp $	*/
 
-/*
+/*-
  * Copyright (c) 2002 Marcel Moolenaar
  * All rights reserved.
  *
@@ -25,296 +26,155 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
- * $FreeBSD: /repoman/r/ncvs/src/sys/kern/kern_uuid.c,v 1.7 2004/01/12 13:34:11 rse Exp $
+ * $FreeBSD: /repoman/r/ncvs/src/sys/kern/kern_uuid.c,v 1.7 2004/01/12 
+13:34:11 rse Exp $
+ */
+/*-
+ * Copyright (c) 2002 Thomas Moestl <tmm@FreeBSD.org>
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ *
+ * $FreeBSD: src/sys/sys/endian.h,v 1.7 2010/05/20 06:16:13 phk Exp $
  */
 
-//#include <sys/systm.h>
-//#include <sys/malloc.h>
-//#include <sys/pool.h>
-//#include <sys/queue.h>
-//#include <sys/kthread.h>
-
 #include <sys/param.h>
-#include <sys/systm.h>
 #include <sys/endian.h>
-#include <sys/kernel.h>
-#include <sys/mutex.h>
-#include <sys/socket.h>
+#include <sys/systm.h>
 #include <sys/uuid.h>
+#include <sys/time.h>
+#include <sys/queue.h>
 
-/* NetBSD */
+#include <sys/kernel.h>
+#include <sys/malloc.h>
+#include <sys/fcntl.h>
+#include <sys/buf.h>
+#include <sys/stat.h>
+#include <sys/syslog.h>
+#include <sys/device.h>
+#include <sys/disklabel.h>
+#include <sys/conf.h>
+#include <sys/lock.h>
+#include <sys/disk.h>
+#include <sys/reboot.h>
+#include <sys/dkio.h>
+#include <sys/vnode.h>
+#include <sys/workq.h>
+
+#include <sys/socket.h>
+#include <sys/socketvar.h>
+#include <machine/mplock.h>
+
+#include <sys/types.h>
 #include <sys/proc.h>
 #include <sys/mount.h>
 #include <sys/syscallargs.h>
-#include <sys/uio.h>
-#include <lib/libkern/libkern.h>
 
 #include <net/if.h>
-#include <net/if_dl.h>
 #include <net/if_types.h>
 
-#include <sys/kernel.h>
-#include <sys/sched.h>
-
 #include <dev/rndvar.h>
+#include <dev/cons.h>
 
-typedef enum kmutex_type_t {
-	MUTEX_SPIN = 0,		/* To get a spin mutex at IPL_NONE */
-	MUTEX_ADAPTIVE = 1,	/* For porting code written for Solaris */
-	MUTEX_DEFAULT = 2,	/* The only native, endorsed type */
-	MUTEX_DRIVER = 3,	/* For porting code written for Solaris */
-	MUTEX_NODEBUG = 4	/* Disables LOCKDEBUG; use with care */
-} kmutex_type_t;
+#include <net/route.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
+#include <netinet/ip6.h>
+#include <netinet/if_ether.h>
 
-typedef struct kmutex kmutex_t;
+//static u_char IBAA_Byte(void);
+//u_int read_random(void *buf, u_int nbytes);
 
-#define	KERNEL_LOCKED_P()		_kernel_locked_p()
+int if_getanyethermac(uint16_t *, int);
 
-#define	bswap16	swap16
-#define	bswap32	swap32
 
-/*
- * General byte order swapping functions.
- */
-//#define	bswap16(x)	__bswap16(x)
-//#define	bswap32(x)	__bswap32(x)
-#define	bswap64(x)	__bswap64(x)
+#define IF_LLSOCKADDR(ifp) \
+((struct sockaddr_dl *)(ifp)->if_lladdr->ifa_addr)
+#define IF_LLADDR(ifp) LLADDR(IF_LLSOCKADDR(ifp))
 
 /*
- * Host to big endian, host to little endian, big endian to host, and little
- * endian to host byte order functions as detailed in byteorder(9).
- */
-#if _BYTE_ORDER == _LITTLE_ENDIAN
-//#define	htobe16(x)	bswap16((x))
-//#define	htobe32(x)	bswap32((x))
-//#define	htobe64(x)	bswap64((x))
-//#define	htole16(x)	((uint16_t)(x))
-//#define	htole32(x)	((uint32_t)(x))
-//#define	htole64(x)	((uint64_t)(x))
+#define PAD_(t) (sizeof(register_t) <= sizeof(t) ? \
+	0 : sizeof(register_t) - sizeof(t))
 
-#define	be16toh(x)	bswap16((x))
-#define	be32toh(x)	bswap32((x))
-#define	be64toh(x)	bswap64((x))
-#define	le16toh(x)	((uint16_t)(x))
-#define	le32toh(x)	((uint32_t)(x))
-#define	le64toh(x)	((uint64_t)(x))
-#else /* _BYTE_ORDER != _LITTLE_ENDIAN */
-#define	htobe16(x)	((uint16_t)(x))
-#define	htobe32(x)	((uint32_t)(x))
-#define	htobe64(x)	((uint64_t)(x))
-#define	htole16(x)	bswap16((x))
-#define	htole32(x)	bswap32((x))
-#define	htole64(x)	bswap64((x))
 
-#define	be16toh(x)	((uint16_t)(x))
-#define	be32toh(x)	((uint32_t)(x))
-#define	be64toh(x)	((uint64_t)(x))
-#define	le16toh(x)	bswap16((x))
-#define	le32toh(x)	bswap32((x))
-#define	le64toh(x)	bswap64((x))
-#endif /* _BYTE_ORDER == _LITTLE_ENDIAN */
+struct	uuidgen_args {
+#ifdef _KERNEL
+	//struct sysmsg sysmsg;
+#endif
+	struct uuid *store;	
+	char store_[PAD_(struct uuid *)];
+	int	count;	
+	char count_[PAD_(int)];
+};
+*/
+
+struct uuid *kern_uuidgen(struct uuid *store, size_t count);
+int sys_uuidgen(struct proc *, void *, register_t *);
+
 
 /*
- * See also:
- *	http://www.opengroup.org/dce/info/draft-leach-uuids-guids-01.txt
- *	http://www.opengroup.org/onlinepubs/009629399/apdxa.htm
- *
- * Note that the generator state is itself an UUID, but the time and clock
- * sequence fields are written in the native byte order.
+ * For a description of UUIDs see RFC 4122.
  */
 
-//CTASSERT(sizeof(struct uuid) == 16);
-
-/* We use an alternative, more convenient representation in the generator. */
 struct uuid_private {
 	union {
-		uint64_t	ll;		/* internal. */
+		uint64_t	ll;	/* internal. */
 		struct {
-			uint32_t	low;
-			uint16_t	mid;
-			uint16_t	hi;
+			uint32_t low;
+			uint16_t mid;
+			uint16_t hi;
 		} x;
 	} time;
-	uint16_t	seq;			/* Big-endian. */
-	uint16_t	node[UUID_NODE_LEN>>1];
+	uint16_t seq;
+	uint16_t node[_UUID_NODE_LEN>>1];
 };
 
-//CTASSERT(sizeof(struct uuid_private) == 16);
-
-static struct uuid_private uuid_last;
-
-/* "UUID generator mutex lock" */
-//static kmutex_t uuid_mutex;
-struct mutex uuid_mutex = MUTEX_INITIALIZER(IPL_NONE);
-
-
-void
-uuid_init(void)
-{
-
-	mtx_init(&uuid_mutex, MUTEX_DEFAULT); // IPL_NONE);
-}
-
-void _arc4randbytes(void *, size_t);
-//uint32_t _arc4random(void);
-
-static inline size_t
-cprng_fast(void *p, size_t len)
-{
-	_arc4randbytes(p, len);
-	return len;
-}
-
-static inline uint32_t
-cprng_fast32(void)
-{
-	return arc4random();
-}
-
+struct uuid_private uuid_last;
 
 /*
- * Return the first MAC address we encounter or, if none was found,
- * construct a sufficiently random multicast address. We don't try
- * to return the same MAC address as previously returned. We always
- * generate a new multicast address if no MAC address exists in the
- * system.
- * It would be nice to know if 'ifnet' or any of its sub-structures
- * has been changed in any way. If not, we could simply skip the
- * scan and safely return the MAC address we returned before.
+ * Extract a byte from IBAAs 256 32-bit u4 results array. 
+ *
+ * NOTE: This code is designed to prevent MP races from taking
+ * IBAA_byte_index out of bounds.
  */
-static void
-uuid_node(uint16_t *node)
-{
-	//struct ifnet *ifp;
-	//struct ifaddr *ifa;
-	//struct sockaddr_dl *sdl;
-	int i, s;
-
-	s = splnet();
-	// XXX KERNEL_LOCK(1, NULL);
-	//IFNET_FOREACH(ifp) {
-		/* Walk the address list */
-	//	IFADDR_FOREACH(ifa, ifp) {
-	//		sdl = (struct sockaddr_dl*)ifa->ifa_addr;
-	//		if (sdl != NULL && sdl->sdl_family == AF_LINK &&
-	//		    sdl->sdl_type == IFT_ETHER) {
-	//			/* Got a MAC address. */
-	//			memcpy(node, CLLADDR(sdl), UUID_NODE_LEN);
-	//			KERNEL_UNLOCK_ONE(NULL);
-	//			splx(s);
-	//			return;
-	//		}
-	//	}
-	//}
-	//KERNEL_UNLOCK_ONE(NULL);
-	splx(s);
-
-	for (i = 0; i < (UUID_NODE_LEN>>1); i++)
-		node[i] = (uint16_t)cprng_fast32();
-	*((uint8_t*)node) |= 0x01;
-}
-
 /*
- * Get the current time as a 60 bit count of 100-nanosecond intervals
- * since 00:00:00.00, October 15,1582. We apply a magic offset to convert
- * the Unix time since 00:00:00.00, January 1, 1970 to the date of the
- * Gregorian reform to the Christian calendar.
- */
-static uint64_t
-uuid_time(void)
+static u_char
+IBAA_Byte(void)
 {
-	struct timespec tsp;
-	uint64_t xtime = 0x01B21DD213814000LL;
+	u_char result;
+	int index;
 
-	nanotime(&tsp);
-	xtime += (uint64_t)tsp.tv_sec * 10000000LL;
-	xtime += (uint64_t)(tsp.tv_nsec / 100);
-	return (xtime & ((1LL << 60) - 1LL));
-}
-
-/*
- * Internal routine to actually generate the UUID.
- */
-static void
-uuid_generate(struct uuid_private *uuid, uint64_t *timep, int count)
-{
-	uint64_t xtime;
-
-	mtx_enter(&uuid_mutex);
-
-	uuid_node(uuid->node);
-	xtime = uuid_time();
-	*timep = xtime;
-
-	if (uuid_last.time.ll == 0LL || uuid_last.node[0] != uuid->node[0] ||
-	    uuid_last.node[1] != uuid->node[1] ||
-	    uuid_last.node[2] != uuid->node[2])
-		uuid->seq = (uint16_t)cprng_fast32() & 0x3fff;
-	else if (uuid_last.time.ll >= xtime)
-		uuid->seq = (uuid_last.seq + 1) & 0x3fff;
-	else
-		uuid->seq = uuid_last.seq;
-
-	uuid_last = *uuid;
-	uuid_last.time.ll = (xtime + count - 1) & ((1LL << 60) - 1LL);
-
-	mtx_leave(&uuid_mutex);
-}
-
-static int
-kern_uuidgen(struct uuid *store, int count, bool to_user)
-{
-	struct uuid_private uuid;
-	uint64_t xtime;
-	int error = 0, i;
-
-	KASSERT(count >= 1);
-
-	/* Generate the base UUID. */
-	uuid_generate(&uuid, &xtime, count);
-
-	/* Set sequence and variant and deal with byte order. */
-	uuid.seq = htobe16(uuid.seq | 0x8000);
-
-	for (i = 0; i < count; xtime++, i++) {
-		/* Set time and version (=1) and deal with byte order. */
-		uuid.time.x.low = (uint32_t)xtime;
-		uuid.time.x.mid = (uint16_t)(xtime >> 32);
-		uuid.time.x.hi = ((uint16_t)(xtime >> 48) & 0xfff) | (1 << 12);
-		if (to_user) {
-			error = copyout(&uuid, store + i, sizeof(uuid));
-			if (error != 0)
-				break;
-		} else {
-			memcpy(store + i, &uuid, sizeof(uuid));
-		}
+	index = IBAA_byte_index;
+	if (index == sizeof(IBAA_results)) {
+		IBAA_Call();
+		index = 0;
 	}
-
-	return error;
+	result = ((u_char *)IBAA_results)[index];
+	IBAA_byte_index = index + 1;
+	return result;
 }
+*/
 
-//int
-//sys_uuidgen(struct lwp *l, const struct sys_uuidgen_args *uap, register_t *retval)
-//{
-	/*
-	 * Limit the number of UUIDs that can be created at the same time
-	 * to some arbitrary number. This isn't really necessary, but I
-	 * like to have some sort of upper-bound that's less than 2G :-)
-	 * XXX needs to be tunable.
-	 */
-	/* XXX FIX ME if (SCARG(uap,count) < 1 || SCARG(uap,count) > 2048)
-		return (EINVAL);
-	*/
-
-	//return kern_uuidgen(SCARG(uap, store), SCARG(uap,count), true);
-//}
-
-int
-uuidgen(struct uuid *store, int count)
-{
-	return kern_uuidgen(store,count, false);
-}
-
+//#ifdef DEBUG
 int
 uuid_snprintf(char *buf, size_t sz, const struct uuid *uuid)
 {
@@ -323,20 +183,21 @@ uuid_snprintf(char *buf, size_t sz, const struct uuid *uuid)
 
 	id = (const struct uuid_private *)uuid;
 	cnt = snprintf(buf, sz, "%08x-%04x-%04x-%04x-%04x%04x%04x",
-	    id->time.x.low, id->time.x.mid, id->time.x.hi, be16toh(id->seq),
-	    be16toh(id->node[0]), be16toh(id->node[1]), be16toh(id->node[2]));
+	    id->time.x.low, id->time.x.mid, id->time.x.hi, betoh16(id->seq),
+	    betoh16(id->node[0]), betoh16(id->node[1]), betoh16(id->node[2]));
 	return (cnt);
 }
 
 int
 uuid_printf(const struct uuid *uuid)
 {
-	char buf[UUID_STR_LEN];
+	char buf[_UUID_BUF_LEN];
 
 	(void) uuid_snprintf(buf, sizeof(buf), uuid);
-	// Fix me XXX printf("%s", buf);
+	printf("%s", buf);
 	return (0);
 }
+//#endif
 
 /*
  * Encode/Decode UUID into octet-stream.
@@ -355,45 +216,53 @@ uuid_printf(const struct uuid *uuid)
  *  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
  */
 
+/* Alignment-agnostic encode/decode bytestream to/from little/big endian. */
 
-static __inline void __unused
-be16enc(void *buf, uint16_t u)
+static __inline uint16_t
+be16dec(const void *pp)
 {
-	uint8_t *p = (uint8_t *)buf;
-
-	p[0] = ((unsigned)u >> 8) & 0xff;
-	p[1] = u & 0xff;
-}
-
-static __inline void __unused
-le16enc(void *buf, uint16_t u)
-{
-	uint8_t *p = (uint8_t *)buf;
-
-	p[0] = u & 0xff;
-	p[1] = ((unsigned)u >> 8) & 0xff;
-}
-
-static __inline uint16_t __unused
-be16dec(const void *buf)
-{
-	const uint8_t *p = (const uint8_t *)buf;
+	uint8_t const *p = (uint8_t const *)pp;
 
 	return ((p[0] << 8) | p[1]);
 }
 
-static __inline uint16_t __unused
-le16dec(const void *buf)
+static __inline uint32_t
+be32dec(const void *pp)
 {
-	const uint8_t *p = (const uint8_t *)buf;
+	uint8_t const *p = (uint8_t const *)pp;
+
+	return (((unsigned)p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]);
+}
+
+static __inline uint16_t
+le16dec(const void *pp)
+{
+	uint8_t const *p = (uint8_t const *)pp;
 
 	return ((p[1] << 8) | p[0]);
 }
 
-static __inline void __unused
-be32enc(void *buf, uint32_t u)
+static __inline uint32_t
+le32dec(const void *pp)
 {
-	uint8_t *p = (uint8_t *)buf;
+	uint8_t const *p = (uint8_t const *)pp;
+
+	return (((unsigned)p[3] << 24) | (p[2] << 16) | (p[1] << 8) | p[0]);
+}
+
+static __inline void
+be16enc(void *pp, uint16_t u)
+{
+	uint8_t *p = (uint8_t *)pp;
+
+	p[0] = (u >> 8) & 0xff;
+	p[1] = u & 0xff;
+}
+
+static __inline void
+be32enc(void *pp, uint32_t u)
+{
+	uint8_t *p = (uint8_t *)pp;
 
 	p[0] = (u >> 24) & 0xff;
 	p[1] = (u >> 16) & 0xff;
@@ -401,31 +270,24 @@ be32enc(void *buf, uint32_t u)
 	p[3] = u & 0xff;
 }
 
-static __inline void __unused
-le32enc(void *buf, uint32_t u)
+static __inline void
+le16enc(void *pp, uint16_t u)
 {
-	uint8_t *p = (uint8_t *)buf;
+	uint8_t *p = (uint8_t *)pp;
+
+	p[0] = u & 0xff;
+	p[1] = (u >> 8) & 0xff;
+}
+
+static __inline void
+le32enc(void *pp, uint32_t u)
+{
+	uint8_t *p = (uint8_t *)pp;
 
 	p[0] = u & 0xff;
 	p[1] = (u >> 8) & 0xff;
 	p[2] = (u >> 16) & 0xff;
 	p[3] = (u >> 24) & 0xff;
-}
-
-static __inline uint32_t __unused
-be32dec(const void *buf)
-{
-	const uint8_t *p = (const uint8_t *)buf;
-
-	return ((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]);
-}
-
-static __inline uint32_t __unused
-le32dec(const void *buf)
-{
-	const uint8_t *p = (const uint8_t *)buf;
-
-	return ((p[3] << 24) | (p[2] << 16) | (p[1] << 8) | p[0]);
 }
 
 void
@@ -444,7 +306,7 @@ uuid_enc_le(void *buf, const struct uuid *uuid)
 }
 
 void
-uuid_dec_le(void const *buf, struct uuid *uuid)
+uuid_dec_le(const void *buf, struct uuid *uuid)
 {
 	const uint8_t *p = buf;
 	int i;
@@ -474,7 +336,7 @@ uuid_enc_be(void *buf, const struct uuid *uuid)
 }
 
 void
-uuid_dec_be(void const *buf, struct uuid *uuid)
+uuid_dec_be(const void *buf, struct uuid *uuid)
 {
 	const uint8_t *p = buf;
 	int i;
@@ -486,4 +348,145 @@ uuid_dec_be(void const *buf, struct uuid *uuid)
 	uuid->clock_seq_low = p[9];
 	for (i = 0; i < _UUID_NODE_LEN; i++)
 		uuid->node[i] = p[10 + i];
+}
+
+static struct lock uuid_lock;
+
+/*
+ * This function locates the first real ethernet MAC from a network
+ * card and loads it into node, returning 0 on success or ENOENT if
+ * no suitable interfaces were found.  It is used by the uuid code to
+ * generate a unique 6-byte number.
+ */
+
+int
+if_getanyethermac(uint16_t *node, int minlen)
+{
+	struct ifnet *ifp;
+	struct sockaddr_dl *sdl;
+
+	TAILQ_FOREACH(ifp, &ifnet, if_list) {
+		if (ifp->if_type != IFT_ETHER)
+			continue;
+		sdl = (struct sockaddr_dl *)IF_LLSOCKADDR(ifp);
+		// if (sdl->sdl_alen < minlen)
+		// XX if (SCARG(sdl, sdl_alen) < (size_t)minlen)
+		//	continue;
+	      //bcopy(((struct arpcom *)ifp->if_softc)->ac_enaddr, node,
+		bcopy(((struct arpcom *)ifp->if_softc)->ac_enaddr, node,
+		      minlen);
+		return(0);
+	}
+	return (ENOENT);
+}
+
+/*
+ * Ask the network subsystem for a real MAC address from any of the
+ * system interfaces.  If we can't find one, generate a random multicast
+ * MAC address.
+ */
+static void
+uuid_node(uint16_t *node)
+{
+	if (if_getanyethermac(node, UUID_NODE_LEN) != 0)
+		arc4random_buf(node, UUID_NODE_LEN);
+	*((uint8_t*)node) |= 0x01;
+}
+
+/*
+ * Get the current time as a 60 bit count of 100-nanosecond intervals
+ * since 00:00:00.00, October 15,1582. We apply a magic offset to convert
+ * the Unix time since 00:00:00.00, January 1, 1970 to the date of the
+ * Gregorian reform to the Christian calendar.
+ */
+static uint64_t
+uuid_time(void)
+{
+	struct timespec ts;
+	uint64_t time = 0x01B21DD213814000LL;
+
+	nanotime(&ts);
+	time += ts.tv_sec * 10000000LL;		/* 100 ns increments */
+	time += ts.tv_nsec / 100;		/* 100 ns increments */
+	return (time & ((1LL << 60) - 1LL));	/* limit to 60 bits */
+}
+
+struct uuid *
+kern_uuidgen(struct uuid *store, size_t count)
+{
+	struct uuid_private uuid;
+	uint64_t time;
+	size_t n;
+
+	lockmgr(&uuid_lock, LK_EXCLUSIVE | LK_RETRY, 0);
+
+	uuid_node(uuid.node);
+	time = uuid_time();
+
+	if (uuid_last.time.ll == 0LL || uuid_last.node[0] != uuid.node[0] ||
+	    uuid_last.node[1] != uuid.node[1] ||
+	    uuid_last.node[2] != uuid.node[2]) {
+		arc4random_buf(&uuid.seq, sizeof(uuid.seq));
+		uuid.seq &= 0x3fff;
+	} else if (uuid_last.time.ll >= time) {
+		uuid.seq = (uuid_last.seq + 1) & 0x3fff;
+	} else {
+		uuid.seq = uuid_last.seq;
+	}
+
+	uuid_last = uuid;
+	uuid_last.time.ll = (time + count - 1) & ((1LL << 60) - 1LL);
+
+	lockmgr(&uuid_lock, LK_RELEASE, 0);
+
+	/* Set sequence and variant and deal with byte order. */
+	uuid.seq = htobe16(uuid.seq | 0x8000);
+
+	for (n = 0; n < count; n++) {
+		/* Set time and version (=1). */
+		uuid.time.x.low = (uint32_t)time;
+		uuid.time.x.mid = (uint16_t)(time >> 32);
+		uuid.time.x.hi = ((uint16_t)(time >> 48) & 0xfff) | (1 << 12);
+		store[n] = *(struct uuid *)&uuid;
+		time++;
+	}
+
+	return (store);
+}
+
+/*
+ * uuidgen(struct uuid *store, int count)
+ *
+ * Generate an array of new UUIDs
+ */
+int
+sys_uuidgen(struct proc *p, void *v, register_t *retval)
+{
+        struct sys_uuidgen_args  /* {
+                syscallarg(struct uuid *) store;
+                syscallarg(int) count;
+        } */  *uap = v;
+	
+	struct uuid *store;
+	size_t count;
+	int error;
+
+	/*
+	 * Limit the number of UUIDs that can be created at the same time
+	 * to some arbitrary number. This isn't really necessary, but I
+	 * like to have some sort of upper-bound that's less than 2G :-)
+	 * XXX probably needs to be tunable.
+	 */
+	//if (uap->count < 1 || uap->count > 2048)
+	if (SCARG(uap, count) > (size_t)1024)
+		return (EINVAL);
+
+	count = SCARG(uap, count); //uap->count;
+	store = malloc(count * sizeof(struct uuid), M_TEMP, M_WAITOK);
+	if (store == NULL)
+		return (ENOSPC);
+	kern_uuidgen(store, count);
+	error = copyout(store, SCARG(uap, store)/* uap->store */, count * sizeof(struct uuid));
+	free(store, M_TEMP, 0);
+	return (error);
 }

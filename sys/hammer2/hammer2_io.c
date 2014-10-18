@@ -33,46 +33,6 @@
  */
 
 #include "hammer2.h"
-#include "hammer2_chain.h"
-#include "hammer2_io.h"
-
-/*
- * H2 is a copy-on-write filesystem.  In order to allow chains to allocate
- * smaller blocks (down to 64-bytes), but improve performance and make
- * clustered I/O possible using larger block sizes, the kernel buffer cache
- * is abstracted via the hammer2_io structure.
- */
-//RB_HEAD(hammer2_io_tree, hammer2_io);
-
-hammer2_io_t *hammer2_io_getblk(hammer2_mount_t *hmp, off_t lbase,
-                                int lsize, int *ownerp);
-void hammer2_io_putblk(hammer2_io_t **diop);
-void hammer2_io_cleanup(hammer2_mount_t *hmp, struct hammer2_io_tree *tree);
-char *hammer2_io_data(hammer2_io_t *dio, off_t lbase);
-int hammer2_io_new(hammer2_mount_t *hmp, off_t lbase, int lsize,
-                                hammer2_io_t **diop);
-int hammer2_io_newnz(hammer2_mount_t *hmp, off_t lbase, int lsize,
-                                hammer2_io_t **diop);
-int hammer2_io_newq(hammer2_mount_t *hmp, off_t lbase, int lsize,
-                                hammer2_io_t **diop);
-int hammer2_io_bread(hammer2_mount_t *hmp, off_t lbase, int lsize,
-                                hammer2_io_t **diop);
-void hammer2_io_breadcb(hammer2_mount_t *hmp, off_t lbase, int lsize,
-                                void (*callback)(hammer2_io_t *dio,
-                                                 hammer2_cluster_t *arg_l,
-                                                 hammer2_chain_t *arg_c,
-                                                 void *arg_p, off_t arg_o),
-                                hammer2_cluster_t *arg_l,
-                                hammer2_chain_t *arg_c,
-                                void *arg_p, off_t arg_o);
-void hammer2_io_bawrite(hammer2_io_t **diop);
-void hammer2_io_bdwrite(hammer2_io_t **diop);
-int hammer2_io_bwrite(hammer2_io_t **diop);
-int hammer2_io_isdirty(hammer2_io_t *dio);
-void hammer2_io_setdirty(hammer2_io_t *dio);
-void hammer2_io_setinval(hammer2_io_t *dio, u_int bytes);
-void hammer2_io_bqrelse(hammer2_io_t **diop);
-void hammer2_io_bqrelse(hammer2_io_t **diop);
 
 /*
  * Implements an abstraction layer for synchronous and asynchronous
@@ -81,9 +41,9 @@ void hammer2_io_bqrelse(hammer2_io_t **diop);
  * using smaller allocations, without causing deadlocks.
  *
  */
-static void hammer2_io_callback(struct bio *bio);
-// XX not used ? static int hammer2_io_cleanup_callback(hammer2_io_t *dio, void *arg);
-/*
+static void hammer2_io_callback(struct bio2 *bio);
+static int hammer2_io_cleanup_callback(hammer2_io_t *dio, void *arg);
+
 static int
 hammer2_io_cmp(hammer2_io_t *io1, hammer2_io_t *io2)
 {
@@ -93,11 +53,9 @@ hammer2_io_cmp(hammer2_io_t *io1, hammer2_io_t *io2)
 		return(1);
 	return(0);
 }
-*/
 
 RB_PROTOTYPE2(hammer2_io_tree, hammer2_io, rbnode, hammer2_io_cmp, off_t);
 RB_GENERATE2(hammer2_io_tree, hammer2_io, rbnode, hammer2_io_cmp, off_t, pbase);
-
 
 struct hammer2_cleanupcb_info {
 	struct hammer2_io_tree tmptree;
@@ -112,11 +70,11 @@ struct hammer2_cleanupcb_info {
 
 #define HAMMER2_DIO_MASK	0x0FFFFFFF
 
-
-
-//#define RB_LOOKUP(name, root, value)     name##_RB_LOOKUP(root, value)
-//#define hammer2_io_tree_RB_LOOKUP(name, root, value)     name##_RB_LOOKUP(root, value)
-
+void
+vfs_bio_clrbuf(struct buf *bp)
+{
+        brelse(bp);
+}
 
 /*
  * Acquire the requested dio, set *ownerp based on state.  If state is good
@@ -143,8 +101,8 @@ hammer2_io_getblk(hammer2_mount_t *hmp, off_t lbase, int lsize, int *ownerp)
 	/*
 	 * Access/Allocate the DIO
 	 */
-	// XX _shared(&hmp->io_spin);
-	// XXX dio = RB_LOOKUP(hammer2_io_tree, &hmp->iotree, pbase);
+	__mp_lock((struct __mp_lock *)&hmp->io_spin);
+	dio = RB_LOOKUP(hammer2_io_tree, &hmp->iotree, pbase);
 	if (dio) {
 		if ((atomic_fetchadd_int(&dio->refs, 1) &
 		     HAMMER2_DIO_MASK) == 0) {
@@ -156,15 +114,15 @@ hammer2_io_getblk(hammer2_mount_t *hmp, off_t lbase, int lsize, int *ownerp)
 		dio->pbase = pbase;
 		dio->psize = psize;
 		dio->refs = 1;
-		// XX (&hmp->io_spin);
-		// XXX xio = RB_INSERT(hammer2_io_tree, &hmp->iotree, dio);
+		__mp_lock((struct __mp_lock *)&hmp->io_spin);
+		xio = RB_INSERT(hammer2_io_tree, &hmp->iotree, dio);
 		if (xio == NULL) {
 		} else {
 			if ((atomic_fetchadd_int(&xio->refs, 1) &
 			     HAMMER2_DIO_MASK) == 0) {
 				atomic_add_int(&xio->hmp->iofree_count, -1);
 			}
-			free(dio, M_HAMMER2);
+			free(dio, M_HAMMER2, 0);
 			dio = xio;
 		}
 	}
@@ -189,7 +147,7 @@ hammer2_io_getblk(hammer2_mount_t *hmp, off_t lbase, int lsize, int *ownerp)
 		 * We need to acquire the in-progress lock on the buffer
 		 */
 		if (refs & HAMMER2_DIO_INPROG) {
-			// XX tsleep_interlock(dio, 0);
+			tsleep(dio, 0, NULL, 0); // tsleep_interlock?
 			if (atomic_cmpset_int(&dio->refs, refs,
 					      refs | HAMMER2_DIO_WAITING)) {
 				tsleep(dio, PINTERLOCKED, "h2dio", 0);
@@ -229,7 +187,7 @@ hammer2_io_complete(hammer2_io_t *dio, int owner)
 
 	while (owner & HAMMER2_DIO_INPROG) {
 		refs = dio->refs;
-		//cpu_ccfence();
+		cpu_ccfence();
 		good = dio->bp ? HAMMER2_DIO_GOOD : 0;
 		if (atomic_cmpset_int(&dio->refs, refs,
 				      (refs & ~(HAMMER2_DIO_WAITING |
@@ -237,8 +195,8 @@ hammer2_io_complete(hammer2_io_t *dio, int owner)
 				      good)) {
 			if (refs & HAMMER2_DIO_WAITING)
 				wakeup(dio);
-			// XXX if (good)
-			//	BUF_KERNPROC(dio->bp);
+			if (good)
+				__mp_lock((struct __mp_lock *)dio->bp); // was BUF_KERNPROC 
 			break;
 		}
 		/* retry */
@@ -261,6 +219,8 @@ hammer2_io_putblk(hammer2_io_t **diop)
 
 	dio = *diop;
 	*diop = NULL;
+
+	hammer2_io_cleanup_callback(dio, NULL);
 
 	for (;;) {
 		refs = dio->refs;
@@ -327,7 +287,7 @@ hammer2_io_putblk(hammer2_io_t **diop)
 		struct hammer2_cleanupcb_info info;
 
 		RB_INIT(&info.tmptree);
-		// XX (&hmp->io_spin);
+		__mp_lock((struct __mp_lock *)&hmp->io_spin);
 		if (hmp->iofree_count > 1000) {
 			info.count = hmp->iofree_count / 2;
 			RB_SCAN(hammer2_io_tree, &hmp->iotree, NULL,
@@ -340,7 +300,7 @@ hammer2_io_putblk(hammer2_io_t **diop)
 /*
  * Cleanup any dio's with no references which are not in-progress.
  */
-/*
+
 static
 int
 hammer2_io_cleanup_callback(hammer2_io_t *dio, void *arg)
@@ -354,15 +314,15 @@ hammer2_io_cleanup_callback(hammer2_io_t *dio, void *arg)
 			return 0;
 		}
 		KKASSERT(dio->bp == NULL);
-		// XXX RB_REMOVE(hammer2_io_tree, &dio->hmp->iotree, dio);
-		// XXX xio = (hammer2_io_t *)RB_INSERT(hammer2_io_tree, &info->tmptree, dio);
+		RB_REMOVE(hammer2_io_tree, &dio->hmp->iotree, dio);
+		xio = (hammer2_io_t *)RB_INSERT(hammer2_io_tree, &info->tmptree, dio);
 		KKASSERT(xio == NULL);
 		if (--info->count <= 0)	// limit scan 
 			return(-1);
 	}
 	return 0;
 }
-*/
+
 
 void
 hammer2_io_cleanup(hammer2_mount_t *hmp, struct hammer2_io_tree *tree)
@@ -370,10 +330,10 @@ hammer2_io_cleanup(hammer2_mount_t *hmp, struct hammer2_io_tree *tree)
 	hammer2_io_t *dio;
 
 	while ((dio = RB_ROOT(tree)) != NULL) {
-		// XXX RB_REMOVE(hammer2_io_tree, tree, dio);
+		RB_REMOVE(hammer2_io_tree, tree, dio);
 		KKASSERT(dio->bp == NULL &&
 		    (dio->refs & (HAMMER2_DIO_MASK | HAMMER2_DIO_INPROG)) == 0);
-		free(dio, M_HAMMER2);
+		free(dio, M_HAMMER2, 0);
 		atomic_add_int(&hmp->iofree_count, -1);
 	}
 }
@@ -513,8 +473,8 @@ hammer2_io_breadcb(hammer2_mount_t *hmp, off_t lbase, int lsize,
 		dio->arg_c = arg_c;
 		dio->arg_p = arg_p;
 		dio->arg_o = arg_o;
-		breadcb(hmp->devvp, dio->pbase, dio->psize,
-			hammer2_io_callback, dio);
+		bread(hmp->devvp, dio->pbase, dio->psize,
+			(struct buf **)hammer2_io_callback); // , dio);
 	} else {
 		error = 0;
 		callback(dio, arg_l, arg_c, arg_p, arg_o);
@@ -523,17 +483,16 @@ hammer2_io_breadcb(hammer2_mount_t *hmp, off_t lbase, int lsize,
 }
 
 static void
-hammer2_io_callback(struct bio *bio)
+hammer2_io_callback(struct bio2 *bio)
 {
-	hammer2_io_t *dio;
-	/* XXX struct buf *dbp = bio->bio_buf;
+	struct buf *dbp = bio->bio_buf;
 	hammer2_io_t *dio = bio->bio_caller_info1.ptr;
 
 	if ((bio->bio_flags & BIO_DONE) == 0)
-		bpdone(dbp, 0);
+		biodone(dbp);
 	bio->bio_flags &= ~(BIO_DONE | BIO_SYNC);
 	dio->bp = bio->bio_buf;
-	*/
+	
 	//KKASSERT((dio->bp->b_flags & B_ERROR) == 0); /* XXX */
 	hammer2_io_complete(dio, HAMMER2_DIO_INPROG);
 
@@ -579,6 +538,12 @@ hammer2_io_setinval(hammer2_io_t *dio, u_int bytes)
 {
 	if ((u_int)dio->psize == bytes)
 		dio->bp->b_flags |= B_INVAL | B_RELBUF;
+}
+
+void
+hammer2_io_brelse(hammer2_io_t **diop)
+{
+	hammer2_io_putblk(diop);
 }
 
 void

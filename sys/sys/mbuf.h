@@ -1,4 +1,4 @@
-/*	$OpenBSD: mbuf.h,v 1.176 2014/04/22 14:41:03 mpi Exp $	*/
+/*	$OpenBSD: mbuf.h,v 1.182 2014/08/18 05:11:03 dlg Exp $	*/
 /*	$NetBSD: mbuf.h,v 1.19 1996/02/09 18:25:14 christos Exp $	*/
 
 /*
@@ -36,7 +36,6 @@
 #define _SYS_MBUF_H_
 
 #include <sys/malloc.h>
-#include <sys/pool.h>
 #include <sys/queue.h>
 
 /*
@@ -126,11 +125,8 @@ struct mbuf_ext {
 	caddr_t	ext_buf;		/* start of buffer */
 					/* free routine if not the usual */
 	void	(*ext_free)(caddr_t, u_int, void *);
-	void	*ext_arg;		/* argument for ext_free */
+	void	*ext_arg;
 	u_int	ext_size;		/* size of buffer, for ext_free */
-	int	ext_type;
-	u_short	ext_ifidx;		/* index of the interface */
-	int	ext_backend;		/* backend pool the storage came from */
 	struct mbuf *ext_nextref;
 	struct mbuf *ext_prevref;
 #ifdef DEBUG
@@ -170,7 +166,7 @@ struct mbuf {
 #define	M_EXT		0x0001	/* has associated external storage */
 #define	M_PKTHDR	0x0002	/* start of record */
 #define	M_EOR		0x0004	/* end of record */
-#define M_CLUSTER	0x0008	/* external storage is a cluster */
+#define M_EXTWR		0x0008	/* external storage is writable */
 #define	M_PROTO1	0x0010	/* protocol-specific */
 
 /* mbuf pkthdr flags, also in m_flags */
@@ -188,7 +184,7 @@ struct mbuf {
 
 #ifdef _KERNEL
 #define M_BITS \
-    ("\20\1M_EXT\2M_PKTHDR\3M_EOR\4M_CLUSTER\5M_PROTO1\6M_VLANTAG\7M_LOOP" \
+    ("\20\1M_EXT\2M_PKTHDR\3M_EOR\4M_EXTWR\5M_PROTO1\6M_VLANTAG\7M_LOOP" \
     "\10M_FILDROP\11M_BCAST\12M_MCAST\13M_CONF\14M_AUTH\15M_TUNNEL" \
     "\16M_ZEROIZE\17M_COMP\20M_LINK0")
 #endif
@@ -270,7 +266,7 @@ struct mbuf {
 
 #define	MCLADDREFERENCE(o, n)	do {					\
 		int ms = splnet();					\
-		(n)->m_flags |= ((o)->m_flags & (M_EXT|M_CLUSTER));	\
+		(n)->m_flags |= ((o)->m_flags & (M_EXT|M_EXTWR));	\
 		(n)->m_ext.ext_nextref = (o)->m_ext.ext_nextref;	\
 		(n)->m_ext.ext_prevref = (o);				\
 		(o)->m_ext.ext_nextref = (n);				\
@@ -295,14 +291,12 @@ struct mbuf {
  * MCLGET allocates and adds an mbuf cluster to a normal mbuf;
  * the flag M_EXT is set upon success.
  */
-#define	MEXTADD(m, buf, size, type, free, arg) do {			\
+#define	MEXTADD(m, buf, size, mflags, free, arg) do {			\
 	(m)->m_data = (m)->m_ext.ext_buf = (caddr_t)(buf);		\
-	(m)->m_flags |= M_EXT;						\
-	(m)->m_flags &= ~M_CLUSTER;					\
+	(m)->m_flags |= M_EXT | (mflags & M_EXTWR);			\
 	(m)->m_ext.ext_size = (size);					\
 	(m)->m_ext.ext_free = (free);					\
 	(m)->m_ext.ext_arg = (arg);					\
-	(m)->m_ext.ext_type = (type);					\
 	MCLINITREFERENCE(m);						\
 } while (/* CONSTCOND */ 0)
 
@@ -331,7 +325,7 @@ struct mbuf {
  * from must have M_PKTHDR set, and to must be empty.
  */
 #define	M_MOVE_PKTHDR(to, from) do {					\
-	(to)->m_flags = ((to)->m_flags & (M_EXT | M_CLUSTER));		\
+	(to)->m_flags = ((to)->m_flags & (M_EXT | M_EXTWR));		\
 	(to)->m_flags |= (from)->m_flags & M_COPYFLAGS;			\
 	M_MOVE_HDR((to), (from));					\
 	if (((to)->m_flags & M_EXT) == 0)				\
@@ -358,7 +352,7 @@ struct mbuf {
  */
 #define	M_READONLY(m)							\
 	(((m)->m_flags & M_EXT) != 0 &&					\
-	  (((m)->m_flags & M_CLUSTER) == 0 || MCLISREFERENCED(m)))
+	  (((m)->m_flags & M_EXTWR) == 0 || MCLISREFERENCED(m)))
 
 /*
  * Compute the amount of space available
@@ -432,11 +426,7 @@ struct  mbuf *m_getptr(struct mbuf *, int, int *);
 int	m_leadingspace(struct mbuf *);
 int	m_trailingspace(struct mbuf *);
 struct mbuf *m_clget(struct mbuf *, int, struct ifnet *, u_int);
-void	m_clsetwms(struct ifnet *, u_int, u_int, u_int);
-int	m_cldrop(struct ifnet *, int);
-void	m_clcount(struct ifnet *, int);
-void	m_cluncount(struct mbuf *, int);
-void	m_clinitifp(struct ifnet *);
+void	m_extfree_pool(caddr_t, u_int, void *);
 void	m_adj(struct mbuf *, int);
 int	m_copyback(struct mbuf *, int, int, const void *, int);
 void	m_freem(struct mbuf *);
@@ -488,6 +478,57 @@ struct m_tag *m_tag_next(struct mbuf *, struct m_tag *);
  * has payload larger than the value below.
  */
 #define PACKET_TAG_MAXSIZE		52
+
+/*
+ * mbuf lists
+ */
+
+#include <sys/mutex.h>
+
+struct mbuf_list {
+	struct mbuf		*ml_head;
+	struct mbuf		*ml_tail;
+	u_int			ml_len;
+};
+
+#define MBUF_LIST_INITIALIZER() { NULL, NULL, 0 }
+
+void			ml_init(struct mbuf_list *);
+void			ml_enqueue(struct mbuf_list *, struct mbuf *);
+struct mbuf *		ml_dequeue(struct mbuf_list *);
+struct mbuf *		ml_dechain(struct mbuf_list *);
+
+#define	ml_len(_ml)		((_ml)->ml_len)
+#define	ml_empty(_ml)		((_ml)->ml_len == 0)
+
+#define MBUF_LIST_FOREACH(_ml, _m) \
+	for ((_m) = (_ml)->ml_head; (_m) != NULL; (_m) = (_m)->m_nextpkt)
+
+/*
+ * mbuf queues
+ */
+
+struct mbuf_queue {
+	struct mutex		mq_mtx;
+	struct mbuf_list	mq_list;
+	u_int			mq_maxlen;
+	u_int			mq_drops;
+};
+
+#define MBUF_QUEUE_INITIALIZER(_maxlen, _ipl) \
+    { MUTEX_INITIALIZER(_ipl), MBUF_LIST_INITIALIZER(), (_maxlen), 0 }
+
+void			mq_init(struct mbuf_queue *, u_int, int);
+int			mq_enqueue(struct mbuf_queue *, struct mbuf *);
+struct mbuf *		mq_dequeue(struct mbuf_queue *);
+int			mq_enlist(struct mbuf_queue *, struct mbuf_list *);
+void			mq_delist(struct mbuf_queue *, struct mbuf_list *);
+struct mbuf *		mq_dechain(struct mbuf_queue *);
+
+#define	mq_len(_mq)		ml_len(&(_mq)->mq_list)
+#define	mq_empty(_mq)		ml_empty(&(_mq)->mq_list)
+#define	mq_drops(_mq)		((_mq)->mq_drops)
+#define	mq_set_maxlen(_mq, _l)	((_mq)->mq_maxlen = (_l))
 
 #endif /* _KERNEL */
 #endif /* _SYS_MBUF_H_ */

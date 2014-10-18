@@ -1,1 +1,0 @@
-#define	NNMEA	1

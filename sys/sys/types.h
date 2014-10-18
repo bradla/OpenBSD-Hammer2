@@ -1,4 +1,4 @@
-/*	$OpenBSD: types.h,v 1.40 2014/03/11 19:45:28 guenther Exp $	*/
+/*	$OpenBSD: types.h,v 1.42 2014/08/22 23:05:15 krw Exp $	*/
 /*	$NetBSD: types.h,v 1.29 1996/11/15 22:48:25 jtc Exp $	*/
 
 /*-
@@ -40,8 +40,12 @@
 #ifndef _SYS_TYPES_H_
 #define	_SYS_TYPES_H_
 
-#include <sys/_types.h>
-#include <machine/endian.h>
+#include <sys/cdefs.h>
+#if __BSD_VISIBLE
+#include <sys/endian.h>
+#else
+#include <sys/_endian.h>
+#endif
 
 #if __BSD_VISIBLE
 typedef	unsigned char	u_char;
@@ -126,6 +130,8 @@ typedef __psize_t	psize_t;
 #endif /* __BSD_VISIBLE */
 
 /* Standard system types */
+typedef __blkcnt_t	blkcnt_t;	/* blocks allocated for file */
+typedef __blksize_t	blksize_t;	/* optimal blocksize for I/O */
 typedef	char *		caddr_t;	/* core address */
 typedef	__int32_t	daddr32_t;	/* 32-bit disk address */
 typedef	__int64_t	daddr_t;	/* 64-bit disk address */

@@ -1,4 +1,4 @@
-/*	$OpenBSD: vfs_cache.c,v 1.36 2013/11/27 15:48:43 jsing Exp $	*/
+/*	$OpenBSD: vfs_cache.c,v 1.37 2014/09/13 16:06:37 doug Exp $	*/
 /*	$NetBSD: vfs_cache.c,v 1.13 1996/02/04 02:18:09 christos Exp $	*/
 
 /*
@@ -72,12 +72,6 @@ struct pool nch_pool;
 
 void cache_zap(struct namecache *);
 u_long nextvnodeid;
-
-/* void _cache_drop(struct namecache *ncp);
-void _cache_unlink(struct namecache *ncp);
-void _cache_put(struct namecache *ncp);
-void cache_put(struct nchandle *);
-*/
 
 static int
 namecache_compare(struct namecache *n1, struct namecache *n2)
@@ -464,8 +458,7 @@ cache_purgevfs(struct mount *mp)
 	struct namecache *ncp, *nxtcp;
 
 	/* whack the regular entries */
-	for (ncp = TAILQ_FIRST(&nclruhead); ncp != TAILQ_END(&nclruhead);
-	    ncp = nxtcp) {
+	for (ncp = TAILQ_FIRST(&nclruhead); ncp != NULL; ncp = nxtcp) {
 		if (ncp->nc_dvp == NULL || ncp->nc_dvp->v_mount != mp) {
 			nxtcp = TAILQ_NEXT(ncp, nc_lru);
 			continue;
@@ -476,8 +469,7 @@ cache_purgevfs(struct mount *mp)
 		nxtcp = TAILQ_FIRST(&nclruhead);
 	}
 	/* whack the negative entries */
-	for (ncp = TAILQ_FIRST(&nclruneghead); ncp != TAILQ_END(&nclruneghead);
-	    ncp = nxtcp) {
+	for (ncp = TAILQ_FIRST(&nclruneghead); ncp != NULL; ncp = nxtcp) {
 		if (ncp->nc_dvp == NULL || ncp->nc_dvp->v_mount != mp) {
 			nxtcp = TAILQ_NEXT(ncp, nc_neg);
 			continue;
@@ -485,6 +477,6 @@ cache_purgevfs(struct mount *mp)
 		/* free the resources we had */
 		cache_zap(ncp);
 		/* cause rescan of list, it may have altered */
-		nxtcp  = TAILQ_FIRST(&nclruneghead);
+		nxtcp = TAILQ_FIRST(&nclruneghead);
 	}
 }

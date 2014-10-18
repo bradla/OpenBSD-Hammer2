@@ -1,4 +1,4 @@
-/*	$OpenBSD: sysv_shm.c,v 1.56 2014/03/18 06:59:00 guenther Exp $	*/
+/*	$OpenBSD: sysv_shm.c,v 1.58 2014/07/13 15:29:04 tedu Exp $	*/
 /*	$NetBSD: sysv_shm.c,v 1.50 1998/10/21 22:24:29 tron Exp $	*/
 
 /*
@@ -517,7 +517,7 @@ shmexit(struct vmspace *vm)
 	    i++, shmmap_s++)
 		if (shmmap_s->shmid != -1)
 			shm_delete_mapping(vm, shmmap_s);
-	free(vm->vm_shm, M_SHM);
+	free(vm->vm_shm, M_SHM, 0);
 	vm->vm_shm = NULL;
 }
 
@@ -592,17 +592,17 @@ sysctl_sysvshm(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 			return (EINVAL);
 
 		/* Expand shmsegs and shmseqs arrays */
-		newsegs = malloc(val * sizeof(struct shmid_ds *),
+		newsegs = mallocarray(val, sizeof(struct shmid_ds *),
 		    M_SHM, M_WAITOK|M_ZERO);
 		bcopy(shmsegs, newsegs,
 		    shminfo.shmmni * sizeof(struct shmid_ds *));
-		free(shmsegs, M_SHM);
+		free(shmsegs, M_SHM, 0);
 		shmsegs = newsegs;
-		newseqs = malloc(val * sizeof(unsigned short), M_SHM,
+		newseqs = mallocarray(val, sizeof(unsigned short), M_SHM,
 		    M_WAITOK|M_ZERO);
 		bcopy(shmseqs, newseqs,
 		    shminfo.shmmni * sizeof(unsigned short));
-		free(shmseqs, M_SHM);
+		free(shmseqs, M_SHM, 0);
 		shmseqs = newseqs;
 		shminfo.shmmni = val;
 		return (0);

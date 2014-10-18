@@ -1,4 +1,4 @@
-/*	$OpenBSD: sys_process.c,v 1.60 2014/03/30 21:54:48 guenther Exp $	*/
+/*	$OpenBSD: sys_process.c,v 1.65 2014/09/08 01:47:06 guenther Exp $	*/
 /*	$NetBSD: sys_process.c,v 1.55 1996/05/15 06:17:47 tls Exp $	*/
 
 /*-
@@ -185,7 +185,7 @@ sys_ptrace(struct proc *p, void *v, register_t *retval)
 		/*
 		 *	(2) it's a system process
 		 */
-		if (ISSET(t->p_flag, P_SYSTEM))
+		if (ISSET(tr->ps_flags, PS_SYSTEM))
 			return (EPERM);
 
 		/*
@@ -492,7 +492,7 @@ sys_ptrace(struct proc *p, void *v, register_t *retval)
 			struct process *ppr;
 
 			ppr = prfind(tr->ps_oppid);
-			proc_reparent(tr, ppr ? ppr : initproc->p_p);
+			proc_reparent(tr, ppr ? ppr : initprocess);
 		}
 
 		/* not being traced any more */
@@ -528,7 +528,7 @@ sys_ptrace(struct proc *p, void *v, register_t *retval)
 
 	case  PT_ATTACH:
 		/*
-		 * As done in procfs:
+		 * As was done in procfs:
 		 * Go ahead and set the trace flag.
 		 * Save the old parent (it's reset in
 		 *   _DETACH, and also in kern_exit.c:wait4()
@@ -581,7 +581,7 @@ sys_ptrace(struct proc *p, void *v, register_t *retval)
 		if (error == 0) {
 			error = process_write_regs(t, regs);
 		}
-		free(regs, M_TEMP);
+		free(regs, M_TEMP, sizeof(*regs));
 		return (error);
 	case  PT_GETREGS:
 		KASSERT((p->p_flag & P_SYSTEM) == 0);
@@ -593,7 +593,7 @@ sys_ptrace(struct proc *p, void *v, register_t *retval)
 		if (error == 0)
 			error = copyout(regs,
 			    SCARG(uap, addr), sizeof (*regs));
-		free(regs, M_TEMP);
+		free(regs, M_TEMP, sizeof(*regs));
 		return (error);
 #ifdef PT_SETFPREGS
 	case  PT_SETFPREGS:
@@ -606,7 +606,7 @@ sys_ptrace(struct proc *p, void *v, register_t *retval)
 		if (error == 0) {
 			error = process_write_fpregs(t, fpregs);
 		}
-		free(fpregs, M_TEMP);
+		free(fpregs, M_TEMP, sizeof(*fpregs));
 		return (error);
 #endif
 #ifdef PT_GETFPREGS
@@ -620,7 +620,7 @@ sys_ptrace(struct proc *p, void *v, register_t *retval)
 		if (error == 0)
 			error = copyout(fpregs,
 			    SCARG(uap, addr), sizeof(*fpregs));
-		free(fpregs, M_TEMP);
+		free(fpregs, M_TEMP, sizeof(*fpregs));
 		return (error);
 #endif
 #ifdef PT_SETXMMREGS
@@ -634,7 +634,7 @@ sys_ptrace(struct proc *p, void *v, register_t *retval)
 		if (error == 0) {
 			error = process_write_xmmregs(t, xmmregs);
 		}
-		free(xmmregs, M_TEMP);
+		free(xmmregs, M_TEMP, sizeof(*xmmregs));
 		return (error);
 #endif
 #ifdef PT_GETXMMREGS
@@ -648,7 +648,7 @@ sys_ptrace(struct proc *p, void *v, register_t *retval)
 		if (error == 0)
 			error = copyout(xmmregs,
 			    SCARG(uap, addr), sizeof(*xmmregs));
-		free(xmmregs, M_TEMP);
+		free(xmmregs, M_TEMP, sizeof(*xmmregs));
 		return (error);
 #endif
 #ifdef PT_WCOOKIE

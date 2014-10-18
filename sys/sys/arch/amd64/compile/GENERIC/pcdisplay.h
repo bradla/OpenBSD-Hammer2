@@ -1,1 +1,0 @@
-#define	NPCDISPLAY	0

@@ -1,1 +1,0 @@
-#define	NFLASH	0

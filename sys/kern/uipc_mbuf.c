@@ -1,4 +1,4 @@
-/*	$OpenBSD: uipc_mbuf.c,v 1.183 2014/04/22 14:41:03 mpi Exp $	*/
+/*	$OpenBSD: uipc_mbuf.c,v 1.194 2014/09/14 14:17:26 jsg Exp $	*/
 /*	$NetBSD: uipc_mbuf.c,v 1.15.4.1 1996/06/13 17:11:44 cgd Exp $	*/
 
 /*
@@ -74,7 +74,6 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/proc.h>
 #include <sys/malloc.h>
 #include <sys/mbuf.h>
 #include <sys/kernel.h>
@@ -112,15 +111,11 @@ u_int	mclsizes[] = {
 static	char mclnames[MCLPOOLS][8];
 struct	pool mclpools[MCLPOOLS];
 
-int	m_clpool(u_int);
+struct pool *m_clpool(u_int);
 
 int max_linkhdr;		/* largest link-level header */
 int max_protohdr;		/* largest protocol header */
 int max_hdr;			/* largest link+protocol header */
-
-struct timeout m_cltick_tmo;
-int	m_clticks;
-void	m_cltick(void *);
 
 void	m_extfree(struct mbuf *);
 struct mbuf *m_copym0(struct mbuf *, int, int, int, int);
@@ -162,9 +157,6 @@ mbinit(void)
 	}
 
 	nmbclust_update();
-
-	timeout_set(&m_cltick_tmo, m_cltick, NULL);
-	m_cltick(NULL);
 }
 
 void
@@ -253,7 +245,7 @@ m_gethdr(int nowait, int type)
 		m->m_nextpkt = NULL;
 		m->m_data = m->m_pktdat;
 		m->m_flags = M_PKTHDR;
-		bzero(&m->m_pkthdr, sizeof(m->m_pkthdr));
+		memset(&m->m_pkthdr, 0, sizeof(m->m_pkthdr));
 		m->m_pkthdr.pf.prio = IFQ_DEFPRIO;
 	}
 	return (m);
@@ -267,7 +259,7 @@ m_inithdr(struct mbuf *m)
 	m->m_nextpkt = NULL;
 	m->m_data = m->m_pktdat;
 	m->m_flags = M_PKTHDR;
-	bzero(&m->m_pkthdr, sizeof(m->m_pkthdr));
+	memset(&m->m_pkthdr, 0, sizeof(m->m_pkthdr));
 	m->m_pkthdr.pf.prio = IFQ_DEFPRIO;
 
 	return (m);
@@ -285,157 +277,36 @@ m_getclr(int nowait, int type)
 	return (m);
 }
 
-int
+struct pool *
 m_clpool(u_int pktlen)
 {
+	struct pool *pp;
 	int pi;
 
-	for (pi = 0; pi < MCLPOOLS; pi++) {
-		if (pktlen <= mclsizes[pi])
-			return (pi);
+	for (pi = 0; pi < nitems(mclpools); pi++) {
+		pp = &mclpools[pi];
+		if (pktlen <= pp->pr_size)
+			return (pp);
 	}
 
-	return (-1);
-}
-
-void
-m_clinitifp(struct ifnet *ifp)
-{
-	struct mclpool *mclp = ifp->if_data.ifi_mclpool;
-	int i;
-
-	/* Initialize high water marks for use of cluster pools */
-	for (i = 0; i < MCLPOOLS; i++) {
-		mclp = &ifp->if_data.ifi_mclpool[i];
-
-		if (mclp->mcl_lwm == 0)
-			mclp->mcl_lwm = 2;
-		if (mclp->mcl_hwm == 0)
-			mclp->mcl_hwm = 32768;
-
-		mclp->mcl_cwm = MAX(4, mclp->mcl_lwm);
-	}
-}
-
-void
-m_clsetwms(struct ifnet *ifp, u_int pktlen, u_int lwm, u_int hwm)
-{
-	int pi;
-
-	pi = m_clpool(pktlen);
-	if (pi == -1)
-		return;
-
-	ifp->if_data.ifi_mclpool[pi].mcl_lwm = lwm;
-	ifp->if_data.ifi_mclpool[pi].mcl_hwm = hwm;
-}
-
-/*
- * Record when the last timeout has been run.  If the delta is
- * too high, m_cldrop() will notice and decrease the interface
- * high water marks.
- */
-void
-m_cltick(void *arg)
-{
-	extern int ticks;
-
-	m_clticks = ticks;
-	timeout_add(&m_cltick_tmo, 1);
-}
-
-int m_livelock;
-u_int mcllivelocks;
-
-int
-m_cldrop(struct ifnet *ifp, int pi)
-{
-	static int liveticks;
-	struct mclpool *mclp;
-	extern int ticks;
-	int i;
-
-	if (ticks - m_clticks > 1) {
-		struct ifnet *aifp;
-
-		/*
-		 * Timeout did not run, so we are in some kind of livelock.
-		 * Decrease the cluster allocation high water marks on all
-		 * interfaces and prevent them from growth for the very near
-		 * future.
-		 */
-		m_livelock = 1;
-		mcllivelocks++;
-		m_clticks = liveticks = ticks;
-		TAILQ_FOREACH(aifp, &ifnet, if_list) {
-			mclp = aifp->if_data.ifi_mclpool;
-			for (i = 0; i < MCLPOOLS; i++) {
-				int diff = max(mclp[i].mcl_cwm / 8, 2);
-				mclp[i].mcl_cwm = max(mclp[i].mcl_lwm,
-				    mclp[i].mcl_cwm - diff);
-			}
-		}
-	} else if (m_livelock && (ticks - liveticks) > 4)
-		m_livelock = 0;	/* Let the high water marks grow again */
-
-	mclp = &ifp->if_data.ifi_mclpool[pi];
-	if (m_livelock == 0 && ISSET(ifp->if_flags, IFF_RUNNING) &&
-	    mclp->mcl_alive <= 4 && mclp->mcl_cwm < mclp->mcl_hwm &&
-	    mclp->mcl_grown - ticks < 0) {
-		/* About to run out, so increase the current watermark */
-		mclp->mcl_cwm++;
-		mclp->mcl_grown = ticks;
-	} else if (mclp->mcl_alive >= mclp->mcl_cwm)
-		return (1);		/* No more packets given */
-
-	return (0);
-}
-
-void
-m_clcount(struct ifnet *ifp, int pi)
-{
-	ifp->if_data.ifi_mclpool[pi].mcl_alive++;
-}
-
-void
-m_cluncount(struct mbuf *m, int all)
-{
-	struct mbuf_ext *me;
-	struct ifnet *ifp;
-
-	do {
-		me = &m->m_ext;
-		if (((m->m_flags & (M_EXT|M_CLUSTER)) != (M_EXT|M_CLUSTER)) ||
-		    (me->ext_ifidx == 0))
-			continue;
-
-		ifp = if_get(me->ext_ifidx);
-		if (ifp != NULL)
-			ifp->if_data.ifi_mclpool[me->ext_backend].mcl_alive--;
-		me->ext_ifidx = 0;
-	} while (all && (m = m->m_next));
+	return (NULL);
 }
 
 struct mbuf *
 m_clget(struct mbuf *m, int how, struct ifnet *ifp, u_int pktlen)
 {
 	struct mbuf *m0 = NULL;
-	int pi;
+	struct pool *pp;
+	caddr_t buf;
 	int s;
 
-	pi = m_clpool(pktlen);
+	pp = m_clpool(pktlen);
 #ifdef DIAGNOSTIC
-	if (pi == -1)
+	if (pp == NULL)
 		panic("m_clget: request for %u byte cluster", pktlen);
 #endif
 
 	s = splnet();
-
-	if (ifp != NULL && m_cldrop(ifp, pi)) {
-		splx(s);
-		return (NULL);
-	}
-
 	if (m == NULL) {
 		MGETHDR(m0, M_DONTWAIT, MT_DATA);
 		if (m0 == NULL) {
@@ -443,31 +314,25 @@ m_clget(struct mbuf *m, int how, struct ifnet *ifp, u_int pktlen)
 			return (NULL);
 		}
 		m = m0;
-	}			
-	m->m_ext.ext_buf = pool_get(&mclpools[pi],
-	    how == M_WAIT ? PR_WAITOK : PR_NOWAIT);
-	if (!m->m_ext.ext_buf) {
+	}
+	buf = pool_get(pp, how == M_WAIT ? PR_WAITOK : PR_NOWAIT);
+	if (buf == NULL) {
 		if (m0)
 			m_freem(m0);
 		splx(s);
 		return (NULL);
 	}
-	if (ifp != NULL)
-		m_clcount(ifp, pi);
 	splx(s);
 
-	m->m_data = m->m_ext.ext_buf;
-	m->m_flags |= M_EXT|M_CLUSTER;
-	m->m_ext.ext_size = mclpools[pi].pr_size;
-	m->m_ext.ext_free = NULL;
-	m->m_ext.ext_arg = NULL;
-	m->m_ext.ext_backend = pi;
-	if (ifp != NULL)
-		m->m_ext.ext_ifidx = ifp->if_index;
-	else
-		m->m_ext.ext_ifidx = 0;
-	MCLINITREFERENCE(m);
+	MEXTADD(m, buf, pp->pr_size, M_EXTWR, m_extfree_pool, pp);
 	return (m);
+}
+
+void
+m_extfree_pool(caddr_t buf, u_int size, void *pp)
+{
+	splassert(IPL_NET);
+	pool_put(pp, buf);
 }
 
 struct mbuf *
@@ -513,17 +378,13 @@ m_extfree(struct mbuf *m)
 		    m->m_ext.ext_prevref;
 		m->m_ext.ext_prevref->m_ext.ext_nextref =
 		    m->m_ext.ext_nextref;
-	} else if (m->m_flags & M_CLUSTER) {
-		m_cluncount(m, 0);
-		pool_put(&mclpools[m->m_ext.ext_backend],
-		    m->m_ext.ext_buf);
 	} else if (m->m_ext.ext_free)
 		(*(m->m_ext.ext_free))(m->m_ext.ext_buf,
 		    m->m_ext.ext_size, m->m_ext.ext_arg);
 	else
 		panic("unknown type of extension buffer");
 	m->m_ext.ext_size = 0;
-	m->m_flags &= ~(M_EXT|M_CLUSTER);
+	m->m_flags &= ~(M_EXT|M_EXTWR);
 }
 
 void
@@ -589,7 +450,7 @@ m_defrag(struct mbuf *m, int how)
 	if (m0->m_flags & M_EXT) {
 		memcpy(&m->m_ext, &m0->m_ext, sizeof(struct mbuf_ext));
 		MCLINITREFERENCE(m);
-		m->m_flags |= M_EXT|M_CLUSTER;
+		m->m_flags |= m0->m_flags & (M_EXT|M_EXTWR);
 		m->m_data = m->m_ext.ext_buf;
 	} else {
 		m->m_data = m->m_pktdat;
@@ -597,7 +458,7 @@ m_defrag(struct mbuf *m, int how)
 	}
 	m->m_pkthdr.len = m->m_len = m0->m_len;
 
-	m0->m_flags &= ~(M_EXT|M_CLUSTER);	/* cluster is gone */
+	m0->m_flags &= ~(M_EXT|M_EXTWR);	/* cluster is gone */
 	m_free(m0);
 
 	return (0);
@@ -793,7 +654,7 @@ m_copyback(struct mbuf *m0, int off, int len, const void *_cp, int wait)
 					goto out;
 				}
 			}
-			bzero(mtod(n, caddr_t), off);
+			memset(mtod(n, caddr_t), 0, off);
 			n->m_len = len + off;
 			m->m_next = n;
 		}
@@ -1326,7 +1187,7 @@ m_dup_pkthdr(struct mbuf *to, struct mbuf *from, int wait)
 
 	KASSERT(from->m_flags & M_PKTHDR);
 
-	to->m_flags = (to->m_flags & (M_EXT | M_CLUSTER));
+	to->m_flags = (to->m_flags & (M_EXT | M_EXTWR));
 	to->m_flags |= (from->m_flags & M_COPYFLAGS);
 	to->m_pkthdr = from->m_pkthdr;
 
@@ -1349,39 +1210,186 @@ m_print(void *v,
 	struct mbuf *m = v;
 
 	(*pr)("mbuf %p\n", m);
-	(*pr)("m_type: %hi\tm_flags: %hb\n", m->m_type, m->m_flags, M_BITS);
+	(*pr)("m_type: %i\tm_flags: %b\n", m->m_type, m->m_flags, M_BITS);
 	(*pr)("m_next: %p\tm_nextpkt: %p\n", m->m_next, m->m_nextpkt);
 	(*pr)("m_data: %p\tm_len: %u\n", m->m_data, m->m_len);
 	(*pr)("m_dat: %p\tm_pktdat: %p\n", m->m_dat, m->m_pktdat);
 	if (m->m_flags & M_PKTHDR) {
 		(*pr)("m_ptkhdr.rcvif: %p\tm_pkthdr.len: %i\n",
 		    m->m_pkthdr.rcvif, m->m_pkthdr.len);
-		(*pr)("m_ptkhdr.tags: %p\tm_pkthdr.tagsset: %hb\n",
+		(*pr)("m_ptkhdr.tags: %p\tm_pkthdr.tagsset: %b\n",
 		    SLIST_FIRST(&m->m_pkthdr.tags),
 		    m->m_pkthdr.tagsset, MTAG_BITS);
-		(*pr)("m_pkthdr.csum_flags: %hb\n",
+		(*pr)("m_pkthdr.csum_flags: %b\n",
 		    m->m_pkthdr.csum_flags, MCS_BITS);
-		(*pr)("m_pkthdr.ether_vtag: %hu\tm_ptkhdr.ph_rtableid: %u\n",
+		(*pr)("m_pkthdr.ether_vtag: %u\tm_ptkhdr.ph_rtableid: %u\n",
 		    m->m_pkthdr.ether_vtag, m->m_pkthdr.ph_rtableid);
 		(*pr)("m_pkthdr.pf.statekey: %p\tm_pkthdr.pf.inp %p\n",
 		    m->m_pkthdr.pf.statekey, m->m_pkthdr.pf.inp);
-		(*pr)("m_pkthdr.pf.qid: %u\tm_pkthdr.pf.tag: %hu\n",
+		(*pr)("m_pkthdr.pf.qid: %u\tm_pkthdr.pf.tag: %u\n",
 		    m->m_pkthdr.pf.qid, m->m_pkthdr.pf.tag);
-		(*pr)("m_pkthdr.pf.flags: %hhb\n",
+		(*pr)("m_pkthdr.pf.flags: %b\n",
 		    m->m_pkthdr.pf.flags, MPF_BITS);
-		(*pr)("m_pkthdr.pf.routed: %hhu\tm_pkthdr.pf.prio: %hhu\n",
+		(*pr)("m_pkthdr.pf.routed: %u\tm_pkthdr.pf.prio: %u\n",
 		    m->m_pkthdr.pf.routed, m->m_pkthdr.pf.prio);
 	}
 	if (m->m_flags & M_EXT) {
 		(*pr)("m_ext.ext_buf: %p\tm_ext.ext_size: %u\n",
 		    m->m_ext.ext_buf, m->m_ext.ext_size);
-		(*pr)("m_ext.ext_type: %x\tm_ext.ext_backend: %i\n",
-		    m->m_ext.ext_type, m->m_ext.ext_backend);
-		(*pr)("m_ext.ext_ifidx: %u\n", m->m_ext.ext_ifidx);
 		(*pr)("m_ext.ext_free: %p\tm_ext.ext_arg: %p\n",
 		    m->m_ext.ext_free, m->m_ext.ext_arg);
 		(*pr)("m_ext.ext_nextref: %p\tm_ext.ext_prevref: %p\n",
 		    m->m_ext.ext_nextref, m->m_ext.ext_prevref);
+
 	}
 }
 #endif
+
+/*
+ * mbuf lists
+ */
+
+void ml_join(struct mbuf_list *, struct mbuf_list *);
+
+void
+ml_init(struct mbuf_list *ml)
+{
+	ml->ml_head = ml->ml_tail = NULL;
+	ml->ml_len = 0;
+}
+
+void
+ml_enqueue(struct mbuf_list *ml, struct mbuf *m)
+{
+	if (ml->ml_tail == NULL)
+		ml->ml_head = ml->ml_tail = m;
+	else {
+		ml->ml_tail->m_nextpkt = m;
+		ml->ml_tail = m;
+	}
+
+	m->m_nextpkt = NULL;
+	ml->ml_len++;
+}
+
+void
+ml_join(struct mbuf_list *mla, struct mbuf_list *mlb)
+{
+	if (mla->ml_tail == NULL)
+		*mla = *mlb;
+	else if (mlb->ml_tail != NULL) {
+		mla->ml_tail->m_nextpkt = mlb->ml_head;
+		mla->ml_tail = mlb->ml_tail;
+		mla->ml_len += mlb->ml_len;
+
+		ml_init(mlb);
+	}
+}
+
+struct mbuf *
+ml_dequeue(struct mbuf_list *ml)
+{
+	struct mbuf *m;
+
+	m = ml->ml_head;
+	if (m != NULL) {
+		ml->ml_head = m->m_nextpkt;
+		if (ml->ml_head == NULL)
+			ml->ml_tail = NULL;
+
+		m->m_nextpkt = NULL;
+		ml->ml_len--;
+	}
+
+	return (m);
+}
+
+struct mbuf *
+ml_dechain(struct mbuf_list *ml)
+{
+	struct mbuf *m0;
+
+	m0 = ml->ml_head;
+
+	ml_init(ml);
+
+	return (m0);
+}
+
+/*
+ * mbuf queues
+ */
+
+void
+mq_init(struct mbuf_queue *mq, u_int maxlen, int ipl)
+{
+	mtx_init(&mq->mq_mtx, ipl);
+	ml_init(&mq->mq_list);
+	mq->mq_maxlen = maxlen;
+}
+
+int
+mq_enqueue(struct mbuf_queue *mq, struct mbuf *m)
+{
+	int dropped = 0;
+
+	mtx_enter(&mq->mq_mtx);
+	if (mq_len(mq) < mq->mq_maxlen)
+		ml_enqueue(&mq->mq_list, m);
+	else {
+		mq->mq_drops++;
+		dropped = 1;
+	}
+	mtx_leave(&mq->mq_mtx);
+
+	if (dropped)
+		m_freem(m);
+
+	return (dropped);
+}
+
+struct mbuf *
+mq_dequeue(struct mbuf_queue *mq)
+{
+	struct mbuf *m;
+
+	mtx_enter(&mq->mq_mtx);
+	m = ml_dequeue(&mq->mq_list);
+	mtx_leave(&mq->mq_mtx);
+
+	return (m);
+}
+
+int
+mq_enlist(struct mbuf_queue *mq, struct mbuf_list *ml)
+{
+	int full;
+
+	mtx_enter(&mq->mq_mtx);
+	ml_join(&mq->mq_list, ml);
+	full = mq_len(mq) >= mq->mq_maxlen;
+	mtx_leave(&mq->mq_mtx);
+
+	return (full);
+}
+
+void
+mq_delist(struct mbuf_queue *mq, struct mbuf_list *ml)
+{
+	mtx_enter(&mq->mq_mtx);
+	*ml = mq->mq_list;
+	ml_init(&mq->mq_list);
+	mtx_leave(&mq->mq_mtx);
+}
+
+struct mbuf *
+mq_dechain(struct mbuf_queue *mq)
+{
+	struct mbuf *m0;
+
+	mtx_enter(&mq->mq_mtx);
+	m0 = ml_dechain(&mq->mq_list);
+	mtx_leave(&mq->mq_mtx);
+
+	return (m0);
+}

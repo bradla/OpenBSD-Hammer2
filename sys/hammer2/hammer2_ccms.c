@@ -39,14 +39,20 @@
 #include <sys/systm.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
+#include <sys/objcache.h>
 #include <sys/sysctl.h>
 #include <sys/uio.h>
 #include <machine/limits.h>
+#include <machine/mplock.h>
 
-
+#include "hammer2.h"
 #include "hammer2_ccms.h"
+#include "hammer2_mplock.h"
 
 int ccms_debug = 0;
+
+struct thread *curthread;
+struct thread *curthread2;
 
 int ssleep(const volatile void *, struct lock *, int, const char *, int);
 int lksleep(const volatile void *, struct lock *, int, const char *, int);
@@ -70,7 +76,7 @@ ssleep(const volatile void *ident, struct lock *spin, int flags,
         //tsleep_interlock(gd, ident, flags, 10);
         //spin_unlock_quick(gd, spin);
         error = tsleep(ident, flags , wmesg, timo);
-        //_spin_lock_quick(gd, spin, wmesg);
+        //___mp_lock_quick(gd, spin, wmesg);
 
         return (error);
 }
@@ -113,6 +119,7 @@ void
 ccms_cst_init(ccms_cst_t *cst, void *handle)
 {
 	bzero(cst, sizeof(*cst));
+	//spin_init(&cst->spin, "ccmscst");
 	cst->handle = handle;
 }
 
@@ -224,12 +231,14 @@ ccms_lock_put(ccms_lock_t *lock)
 void
 ccms_thread_lock(ccms_cst_t *cst, ccms_state_t state)
 {
+
 	/*
 	 * Regardless of the type of lock requested if the current thread
 	 * already holds an exclusive lock we bump the exclusive count and
 	 * return.  This requires no spinlock.
 	 */
-	if (cst->count < 0 /* && cst->td == curthread XX cst->td thread_t/proc convert to int */) {
+	LOCKENTER;
+	if (cst->count < 0 && cst->td == (struct proc *)curthread2) {
 		--cst->count;
 		return;
 	}
@@ -238,7 +247,7 @@ ccms_thread_lock(ccms_cst_t *cst, ccms_state_t state)
 	 * Otherwise use the spinlock to interlock the operation and sleep
 	 * as necessary.
 	 */
-	// XX (&cst->spin); 
+	__mp_lock((struct __mp_lock *)&cst->spin); 
 	if (state == CCMS_STATE_SHARED) {
 		while (cst->count < 0 || cst->upgrade) {
 			cst->blocked = 1;
@@ -252,10 +261,12 @@ ccms_thread_lock(ccms_cst_t *cst, ccms_state_t state)
 			ssleep(cst, NULL /* &cst->spin */, 0, "ccmslck", hz);
 		}
 		cst->count = -1;
-		/* proc ex lock */ /* XX cst->td = curthread; */
+		/* proc ex lock */ /* XX cst->td = curthread2; */
 	} else {
+		__mp_unlock((struct __mp_lock *)&cst->spin);
 		panic("ccms_thread_lock: bad state %d\n", state);
 	}
+	__mp_unlock((struct __mp_lock *)&cst->spin);
 }
 
 /*
@@ -265,27 +276,33 @@ ccms_thread_lock(ccms_cst_t *cst, ccms_state_t state)
 int
 ccms_thread_lock_nonblock(ccms_cst_t *cst, ccms_state_t state)
 {
-	if (cst->count < 0 /* XX && cst->td == curthread */) {
+	if (cst->count < 0 /* XX && cst->td == curthread2 */) {
 		--cst->count;
+		LOCKENTER;
 		return(0);
 	}
 
-	//(&cst->spin);
+	__mp_lock((struct __mp_lock *)&cst->spin);
 	if (state == CCMS_STATE_SHARED) {
 		if (cst->count < 0 || cst->upgrade) {
+			__mp_unlock((struct __mp_lock *)&cst->spin);
 			return (EBUSY);
 		}
 		++cst->count;
 		KKASSERT(cst->td == NULL);
 	} else if (state == CCMS_STATE_EXCLUSIVE) {
 		if (cst->count != 0 || cst->upgrade) {
+			__mp_unlock((struct __mp_lock *)&cst->spin);
 			return (EBUSY);
 		}
 		cst->count = -1;
-		//cst->td = curthread;
+		// XX cst->td = curthread;
 	} else {
+		__mp_unlock((struct __mp_lock *)&cst->spin);
 		panic("ccms_thread_lock_nonblock: bad state %d\n", state);
 	}
+	__mp_unlock((struct __mp_lock *)&cst->spin);
+	LOCKENTER;
 	return(0);
 }
 
@@ -329,7 +346,7 @@ ccms_thread_lock_upgrade(ccms_cst_t *cst)
 	 * Convert a shared lock to exclusive.
 	 */
 	if (cst->count > 0) {
-		//(&cst->spin);
+		__mp_lock((struct __mp_lock *)&cst->spin);
 		++cst->upgrade;
 		--cst->count;
 		while (cst->count) {
@@ -338,6 +355,7 @@ ccms_thread_lock_upgrade(ccms_cst_t *cst)
 		}
 		cst->count = -1;
 		// XX cst->td = curthread;
+		__mp_unlock((struct __mp_lock *)&cst->spin);
 		return(CCMS_STATE_SHARED);
 	}
 	panic("ccms_thread_lock_upgrade: not locked");
@@ -351,14 +369,16 @@ ccms_thread_lock_downgrade(ccms_cst_t *cst, ccms_state_t ostate)
 	if (ostate == CCMS_STATE_SHARED) {
 		//KKASSERT(cst->td == curthread);
 		KKASSERT(cst->count == -1);
-		// XX (&cst->spin);
+		__mp_lock((struct __mp_lock *)&cst->spin);
 		--cst->upgrade;
 		cst->count = 1;
 		cst->td = NULL;
 		if (cst->blocked) {
 			cst->blocked = 0;
+			__mp_unlock((struct __mp_lock *)&cst->spin);
 			wakeup(cst);
 		} else {
+			__mp_unlock((struct __mp_lock *)&cst->spin);
 		}
 	}
 	/* else nothing to do if excl->excl */
@@ -370,6 +390,7 @@ ccms_thread_lock_downgrade(ccms_cst_t *cst, ccms_state_t ostate)
 void
 ccms_thread_unlock(ccms_cst_t *cst)
 {
+	LOCKEXIT;
 	if (cst->count < 0) {
 		/*
 		 * Exclusive
@@ -379,25 +400,29 @@ ccms_thread_unlock(ccms_cst_t *cst)
 			++cst->count;
 			return;
 		}
-		// XX (&cst->spin);
+		__mp_lock((struct __mp_lock *)&cst->spin);
 		KKASSERT(cst->count == -1);
 		cst->count = 0;
 		cst->td = NULL;
 		if (cst->blocked) {
 			cst->blocked = 0;
+			__mp_unlock((struct __mp_lock *)&cst->spin);
 			wakeup(cst);
 			return;
 		}
+		__mp_unlock((struct __mp_lock *)&cst->spin);
 	} else if (cst->count > 0) {
 		/*
 		 * Shared
 		 */
-		// XX (&cst->spin);
+		__mp_lock((struct __mp_lock *)&cst->spin);
 		if (--cst->count == 0 && cst->blocked) {
 			cst->blocked = 0;
+			__mp_unlock((struct __mp_lock *)&cst->spin);
 			wakeup(cst);
 			return;
 		}
+		__mp_unlock((struct __mp_lock *)&cst->spin);
 	} else {
 		panic("ccms_thread_unlock: bad zero count\n");
 	}
@@ -417,16 +442,19 @@ void
 ccms_thread_unlock_upgraded(ccms_cst_t *cst, ccms_state_t ostate)
 {
 	if (ostate == CCMS_STATE_SHARED) {
+		LOCKEXIT;
 		// XX KKASSERT(cst->td == curthread);
 		KKASSERT(cst->count == -1);
-		// XX (&cst->spin);
+		__mp_lock((struct __mp_lock *)&cst->spin);
 		--cst->upgrade;
 		cst->count = 0;
 		cst->td = NULL;
 		if (cst->blocked) {
 			cst->blocked = 0;
+			__mp_unlock((struct __mp_lock *)&cst->spin);
 			wakeup(cst);
 		} else {
+			__mp_unlock((struct __mp_lock *)&cst->spin);
 		}
 	} else {
 		ccms_thread_unlock(cst);
@@ -457,16 +485,19 @@ ccms_thread_unlock_zero(ccms_cst_t *cst)
 		 */
 		KKASSERT(cst->td == curthread);
 		if (cst->count == -1) {
-			(&cst->spin);
+			__mp_lock(&cst->spin);
 			if (cst->upgrade) {
 				cst->count = 0;
 				if (cst->blocked) {
 					cst->blocked = 0;
+					__mp_unlock((struct __mp_lock *)&cst->spin);
 					wakeup(cst);
 				} else {
+					__mp_unlock((struct __mp_lock *)&cst->spin);
 				}
 				return(1);
 			}
+			__mp_unlock((struct __mp_lock *)&cst->spin);
 			return(0);
 		}
 		++cst->count;
@@ -479,24 +510,28 @@ ccms_thread_unlock_zero(ccms_cst_t *cst)
 		 * the upgrade waiters are woken up.  The upgrade count
 		 * prevents new exclusive holders for the duration.
 		 */
-		(&cst->spin);
+		__mp_lock((struct __mp_lock *)&cst->spin);
 		KKASSERT(cst->count > 0);
 		if (cst->count == 1) {
 			if (cst->upgrade) {
 				cst->count = 0;
 				if (cst->blocked) {
 					cst->blocked = 0;
+					__mp_unlock((struct __mp_lock *)&cst->spin);
 					wakeup(cst);
 				} else {
+					__mp_unlock((struct __mp_lock *)&cst->spin);
 				}
 				return(1);
 			} else {
 				cst->count = -1;
 				cst->td = curthread;
+				__mp_unlock((struct __mp_lock *)&cst->spin);
 				return(0);
 			}
 		}
 		--cst->count;
+		__mp_unlock((struct __mp_lock *)&cst->spin);
 	}
 	return(1);
 }

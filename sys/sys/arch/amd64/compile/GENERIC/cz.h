@@ -1,1 +1,0 @@
-#define	NCZ	0

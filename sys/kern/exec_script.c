@@ -1,4 +1,4 @@
-/*	$OpenBSD: exec_script.c,v 1.28 2012/04/22 05:43:14 guenther Exp $	*/
+/*	$OpenBSD: exec_script.c,v 1.31 2014/07/13 23:59:58 tedu Exp $	*/
 /*	$NetBSD: exec_script.c,v 1.13 1996/02/04 02:15:06 christos Exp $	*/
 
 /*
@@ -42,7 +42,6 @@
 #include <sys/filedesc.h>
 #include <sys/exec.h>
 #include <sys/resourcevar.h>
-#include <uvm/uvm_extern.h>
 
 #include <sys/exec_script.h>
 
@@ -209,7 +208,7 @@ check_shell:
 	epp->ep_flags |= EXEC_INDIR;
 
 	/* and set up the fake args list, for later */
-	shellargp = malloc(4 * sizeof(char *), M_EXEC, M_WAITOK);
+	shellargp = mallocarray(4, sizeof(char *), M_EXEC, M_WAITOK);
 	tmpsap = shellargp;
 	*tmpsap = malloc(shellnamelen + 1, M_EXEC, M_WAITOK);
 	strlcpy(*tmpsap++, shellname, shellnamelen + 1);
@@ -312,10 +311,10 @@ fail:
 	/* free the fake arg list, because we're not returning it */
 	if ((tmpsap = shellargp) != NULL) {
 		while (*tmpsap != NULL) {
-			free(*tmpsap, M_EXEC);
+			free(*tmpsap, M_EXEC, 0);
 			tmpsap++;
 		}
-		free(shellargp, M_EXEC);
+		free(shellargp, M_EXEC, 0);
 	}
 
 	/*

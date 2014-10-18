@@ -1,1 +1,0 @@
-#define	NMPE	1

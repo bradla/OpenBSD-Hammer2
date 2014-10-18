@@ -1,4 +1,4 @@
-/*	$OpenBSD: sysv_sem.c,v 1.46 2014/03/18 06:59:00 guenther Exp $	*/
+/*	$OpenBSD: sysv_sem.c,v 1.50 2014/09/13 16:06:37 doug Exp $	*/
 /*	$NetBSD: sysv_sem.c,v 1.26 1996/02/09 19:00:25 christos Exp $	*/
 
 /*
@@ -66,9 +66,9 @@ seminit(void)
 	    &pool_allocator_nointr);
 	pool_init(&semu_pool, SEMUSZ, 0, 0, 0, "semupl",
 	    &pool_allocator_nointr);
-	sema = malloc(seminfo.semmni * sizeof(struct semid_ds *),
+	sema = mallocarray(seminfo.semmni, sizeof(struct semid_ds *),
 	    M_SEM, M_WAITOK|M_ZERO);
-	semseqs = malloc(seminfo.semmni * sizeof(unsigned short),
+	semseqs = mallocarray(seminfo.semmni, sizeof(unsigned short),
 	    M_SEM, M_WAITOK|M_ZERO);
 	SLIST_INIT(&semu_list);
 }
@@ -184,11 +184,11 @@ void
 semundo_clear(int semid, int semnum)
 {
 	struct sem_undo *suptr = SLIST_FIRST(&semu_list);
-	struct sem_undo *suprev = SLIST_END(&semu_list);
+	struct sem_undo *suprev = NULL;
 	struct undo *sunptr;
 	int i;
 
-	while (suptr != SLIST_END(&semu_list)) {
+	while (suptr != NULL) {
 		sunptr = &suptr->un_ent[0];
 		for (i = 0; i < suptr->un_cnt; i++, sunptr++) {
 			if (sunptr->un_id == semid) {
@@ -277,7 +277,7 @@ semctl1(struct proc *p, int semid, int semnum, int cmd, union semun *arg,
 		semaptr->sem_perm.cuid = cred->cr_uid;
 		semaptr->sem_perm.uid = cred->cr_uid;
 		semtot -= semaptr->sem_nsems;
-		free(semaptr->sem_base, M_SEM);
+		free(semaptr->sem_base, M_SEM, 0);
 		pool_put(&sema_pool, semaptr);
 		sema[ix] = NULL;
 		semundo_clear(ix, -1);
@@ -360,7 +360,7 @@ semctl1(struct proc *p, int semid, int semnum, int cmd, union semun *arg,
 	case SETALL:
 		if ((error = ipcperm(cred, &semaptr->sem_perm, IPC_W)))
 			return (error);
-		semval = malloc(semaptr->sem_nsems * sizeof(arg->array[0]),
+		semval = mallocarray(semaptr->sem_nsems, sizeof(arg->array[0]),
 		    M_TEMP, M_WAITOK);
 		for (i = 0; i < semaptr->sem_nsems; i++) {
 			error = ds_copyin(&arg->array[i], &semval[i],
@@ -384,7 +384,8 @@ semctl1(struct proc *p, int semid, int semnum, int cmd, union semun *arg,
 
 error:
 	if (semval)
-		free(semval, M_TEMP);
+		free(semval, M_TEMP,
+		    semaptr->sem_nsems * sizeof(arg->array[0]));
 
 	return (error);
 }
@@ -423,7 +424,7 @@ sys_semget(struct proc *p, void *v, register_t *retval)
 			return (ENOSPC);
 		}
 		semaptr_new = pool_get(&sema_pool, PR_WAITOK);
-		semaptr_new->sem_base = malloc(nsems * sizeof(struct sem),
+		semaptr_new->sem_base = mallocarray(nsems, sizeof(struct sem),
 		    M_SEM, M_WAITOK|M_ZERO);
 	}
 
@@ -446,7 +447,8 @@ sys_semget(struct proc *p, void *v, register_t *retval)
 					goto error;
 				}
 				if (semaptr_new != NULL) {
-					free(semaptr_new->sem_base, M_SEM);
+					free(semaptr_new->sem_base, M_SEM,
+					    nsems * sizeof(struct sem));
 					pool_put(&sema_pool, semaptr_new);
 				}
 				goto found;
@@ -489,7 +491,7 @@ found:
 	return (0);
 error:
 	if (semaptr_new != NULL) {
-		free(semaptr_new->sem_base, M_SEM);
+		free(semaptr_new->sem_base, M_SEM, nsems * sizeof(struct sem));
 		pool_put(&sema_pool, semaptr_new);
 	}
 	return (error);
@@ -545,7 +547,7 @@ sys_semop(struct proc *p, void *v, register_t *retval)
 	if (nsops <= NSOPS)
 		sops = sopbuf;
 	else
-		sops = malloc(nsops * sizeof(struct sembuf), M_SEM, M_WAITOK);
+		sops = mallocarray(nsops, sizeof(struct sembuf), M_SEM, M_WAITOK);
 	error = copyin(SCARG(uap, sops), sops, nsops * sizeof(struct sembuf));
 	if (error != 0) {
 		DPRINTF(("error = %d from copyin(%p, %p, %u)\n", error,
@@ -753,7 +755,7 @@ done:
 	*retval = 0;
 done2:
 	if (sops != sopbuf)
-		free(sops, M_SEM);
+		free(sops, M_SEM, nsops * sizeof(struct sembuf));
 	return (error);
 }
 
@@ -873,16 +875,16 @@ sysctl_sysvsem(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 			return (EINVAL);
 
 		/* Expand semsegs and semseqs arrays */
-		sema_new = malloc(val * sizeof(struct semid_ds *),
+		sema_new = mallocarray(val, sizeof(struct semid_ds *),
 		    M_SEM, M_WAITOK|M_ZERO);
 		bcopy(sema, sema_new,
 		    seminfo.semmni * sizeof(struct semid_ds *));
-		newseqs = malloc(val * sizeof(unsigned short), M_SEM,
+		newseqs = mallocarray(val, sizeof(unsigned short), M_SEM,
 		    M_WAITOK|M_ZERO);
 		bcopy(semseqs, newseqs,
 		    seminfo.semmni * sizeof(unsigned short));
-		free(sema, M_SEM);
-		free(semseqs, M_SEM);
+		free(sema, M_SEM, 0);
+		free(semseqs, M_SEM, 0);
 		sema = sema_new;
 		semseqs = newseqs;
 		seminfo.semmni = val;

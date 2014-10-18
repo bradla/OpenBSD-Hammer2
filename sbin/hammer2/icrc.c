@@ -29,6 +29,7 @@
  | $Id: isc_subr.c 560 2009-05-07 07:37:49Z danny $
  */
 
+#include <sys/param.h>
 #include <sys/types.h>
 #include <sys/uuid.h>
 #include <sys/dmsg.h>

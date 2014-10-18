@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_subr.c,v 1.37 2013/10/19 09:24:57 reyk Exp $	*/
+/*	$OpenBSD: kern_subr.c,v 1.40 2014/07/13 15:48:41 tedu Exp $	*/
 /*	$NetBSD: kern_subr.c,v 1.15 1996/04/09 17:21:56 ragge Exp $	*/
 
 /*
@@ -149,8 +149,8 @@ again:
 		*(char *)iov->iov_base = c;
 		break;
 	
-	case UIO_NOCOPY:
-		break;
+        case UIO_NOCOPY:
+        	break;
 	}
 	iov->iov_base = (caddr_t)iov->iov_base + 1;
 	iov->iov_len--;
@@ -172,7 +172,7 @@ hashinit(int elements, int type, int flags, u_long *hashmask)
 		panic("hashinit: bad cnt");
 	for (hashsize = 1; hashsize < elements; hashsize <<= 1)
 		continue;
-	hashtbl = malloc(hashsize * sizeof(*hashtbl), type, flags);
+	hashtbl = mallocarray(hashsize, sizeof(*hashtbl), type, flags);
 	if (hashtbl == NULL)
 		return NULL;
 	for (i = 0; i < hashsize; i++)
@@ -198,7 +198,7 @@ hook_establish(struct hook_desc_head *head, int tail, void (*fn)(void *),
 {
 	struct hook_desc *hdp;
 
-	hdp = (struct hook_desc *)malloc(sizeof (*hdp), M_DEVBUF, M_NOWAIT);
+	hdp = malloc(sizeof(*hdp), M_DEVBUF, M_NOWAIT);
 	if (hdp == NULL)
 		return (NULL);
 
@@ -227,7 +227,7 @@ hook_disestablish(struct hook_desc_head *head, void *vhook)
 #endif
 	hdp = vhook;
 	TAILQ_REMOVE(head, hdp, hd_list);
-	free(hdp, M_DEVBUF);
+	free(hdp, M_DEVBUF, 0);
 }
 
 /*
@@ -250,7 +250,7 @@ dohooks(struct hook_desc_head *head, int flags)
 			TAILQ_REMOVE(head, hdp, hd_list);
 			(*hdp->hd_fn)(hdp->hd_arg);
 			if ((flags & HOOK_FREE) != 0)
-				free(hdp, M_DEVBUF);
+				free(hdp, M_DEVBUF, 0);
 		}
 	}
 }

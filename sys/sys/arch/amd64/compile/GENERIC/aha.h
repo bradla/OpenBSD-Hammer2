@@ -1,1 +1,0 @@
-#define	NAHA	0

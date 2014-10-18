@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_event.c,v 1.56 2014/03/30 21:54:48 guenther Exp $	*/
+/*	$OpenBSD: kern_event.c,v 1.58 2014/07/12 18:43:32 tedu Exp $	*/
 
 /*-
  * Copyright (c) 1999,2000,2001 Jonathan Lemon <jlemon@FreeBSD.org>
@@ -376,7 +376,7 @@ filt_timerdetach(struct knote *kn)
 
 	to = (struct timeout *)kn->kn_hook;
 	timeout_del(to);
-	free(to, M_KEVENT);
+	free(to, M_KEVENT, 0);
 	kq_ntimeouts--;
 }
 
@@ -993,12 +993,14 @@ knote_fdclose(struct proc *p, int fd)
  * XXX this could be more efficient, doing a single pass down the klist
  */
 void
-knote_processexit(struct process *pr)
+knote_processexit(struct proc *p)
 {
+	struct process *pr = p->p_p;
+
 	KNOTE(&pr->ps_klist, NOTE_EXIT);
 
 	/* remove other knotes hanging off the process */
-	knote_remove(pr->ps_mainproc, &pr->ps_klist);
+	knote_remove(p, &pr->ps_klist);
 }
 
 void
@@ -1025,7 +1027,7 @@ knote_attach(struct knote *kn, struct filedesc *fdp)
 		memset(&list[fdp->fd_knlistsize], 0,
 		    (size - fdp->fd_knlistsize) * sizeof(struct klist));
 		if (fdp->fd_knlist != NULL)
-			free(fdp->fd_knlist, M_TEMP);
+			free(fdp->fd_knlist, M_TEMP, 0);
 		fdp->fd_knlistsize = size;
 		fdp->fd_knlist = list;
 	}

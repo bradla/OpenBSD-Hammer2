@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_malloc.c,v 1.106 2014/04/03 21:36:59 tedu Exp $	*/
+/*	$OpenBSD: kern_malloc.c,v 1.115 2014/09/14 14:17:25 jsg Exp $	*/
 /*	$NetBSD: kern_malloc.c,v 1.15.4.2 1996/06/13 17:10:56 cgd Exp $	*/
 
 /*
@@ -33,7 +33,6 @@
  */
 
 #include <sys/param.h>
-#include <sys/proc.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/systm.h>
@@ -45,18 +44,12 @@
 
 #include <uvm/uvm_extern.h>
 
-static __inline__ long BUCKETINDX(size_t sz)
+static
+#ifndef SMALL_KERNEL
+__inline__
+#endif
+long BUCKETINDX(size_t sz)
 {
-#ifdef SMALL_KERNEL
-	long b;
-
-	if (sz-- == 0)
-		return MINBUCKET;
-
-	for (b = MINBUCKET; b < MINBUCKET + 15; b++)
-		if ((sz >> b) == 0)
-			break;
-#else
 	long b, d;
 
 	/* note that this relies upon MINALLOCSIZE being 1 << MINBUCKET */
@@ -72,17 +65,11 @@ static __inline__ long BUCKETINDX(size_t sz)
 		b += 0;
 	else
 		b += 1;
-#endif
-
 	return b;
 }
 
 static struct vm_map kmem_map_store;
 struct vm_map *kmem_map = NULL;
-
-#ifdef NKMEMCLUSTERS
-#error NKMEMCLUSTERS is obsolete; remove it from your kernel config file and use NKMEMPAGES instead or let the kernel auto-size
-#endif
 
 /*
  * Default number of pages in kmem_map.  We attempt to calculate this
@@ -159,7 +146,7 @@ struct timeval malloc_lasterr;
  * Allocate a block of memory
  */
 void *
-malloc(unsigned long size, int type, int flags)
+malloc(size_t size, int type, int flags)
 {
 	struct kmembuckets *kbp;
 	struct kmemusage *kup;
@@ -181,13 +168,13 @@ malloc(unsigned long size, int type, int flags)
 	KASSERT(flags & (M_WAITOK | M_NOWAIT));
 
 	if ((flags & M_NOWAIT) == 0) {
-#ifdef DIAGNOSTIC
 		extern int pool_debug;
+#ifdef DIAGNOSTIC
 		assertwaitok();
 		if (pool_debug == 2)
 			yield();
 #endif
-		if (!cold) {
+		if (!cold && pool_debug) {
 			KERNEL_UNLOCK();
 			KERNEL_LOCK();
 		}
@@ -325,7 +312,7 @@ malloc(unsigned long size, int type, int flags)
 	/* and check that the data hasn't been modified. */
 	if (freshalloc == 0) {
 		size_t pidx;
-		int pval;
+		uint32_t pval;
 		if (poison_check(va, allocsize, &pidx, &pval)) {
 			panic("%s %zd of object %p size 0x%lx %s %s"
 			    " (0x%x != 0x%x)\n",
@@ -366,7 +353,7 @@ out:
  * Free a block of memory allocated by malloc.
  */
 void
-free(void *addr, int type)
+free(void *addr, int type, size_t freedsize)
 {
 	struct kmembuckets *kbp;
 	struct kmemusage *kup;
@@ -399,6 +386,11 @@ free(void *addr, int type)
 	kbp = &bucket[kup->ku_indx];
 	s = splvm();
 #ifdef DIAGNOSTIC
+	if (freedsize != 0 && freedsize > size)
+		panic("freed too much: %zu > %ld (%p)", freedsize, size, addr);
+	if (freedsize != 0 && size > MINALLOCSIZE && freedsize < size / 2)
+		panic("freed too little: %zu < %ld / 2 (%p)",
+		    freedsize, size, addr);
 	/*
 	 * Check for returns of data that do not point to the
 	 * beginning of the allocation.
@@ -701,3 +693,37 @@ malloc_printit(
 #endif
 }
 #endif /* DDB */
+
+/*
+ * Copyright (c) 2008 Otto Moerbeek <otto@drijf.net>
+ *
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
+
+/*
+ * This is sqrt(SIZE_MAX+1), as s1*s2 <= SIZE_MAX
+ * if both s1 < MUL_NO_OVERFLOW and s2 < MUL_NO_OVERFLOW
+ */
+#define MUL_NO_OVERFLOW	(1UL << (sizeof(size_t) * 4))
+
+void *
+mallocarray(size_t nmemb, size_t size, int type, int flags)
+{
+	if ((nmemb >= MUL_NO_OVERFLOW || size >= MUL_NO_OVERFLOW) &&
+	    nmemb > 0 && SIZE_MAX / nmemb < size) {
+		if (flags & M_CANFAIL)
+			return (NULL);
+		panic("mallocarray overflow: %zu * %zu", nmemb, size);
+	}
+	return (malloc(size * nmemb, type, flags));
+}

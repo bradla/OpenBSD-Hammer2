@@ -35,13 +35,44 @@
 
 #if defined(_KERNEL) || defined(_KERNEL_STRUCTURES)
 
+#ifndef _SYS_TYPES_H_
 #include <sys/types.h>
+#endif
+#ifndef _SYS_MALLOC_H_
 #include <sys/malloc.h>
+#endif
 
-typedef struct malloc_type  *malloc_type_t;
 #define OC_MFLAGS	0x0000ffff	/* same as malloc flags */
 
-typedef int (objcache_ctor_fn)(void *obj, void *privdata, int ocflags);
+#define SMP_MAXCPU 16
+/*
+ * The malloc tracking structure.  Note that per-cpu entries must be
+ * aggregated for accurate statistics, they do not actually break the
+ * stats down by cpu (e.g. the cpu freeing memory will subtract from
+ * its slot, not the originating cpu's slot).
+ *
+ * SMP_MAXCPU is used so modules which use malloc remain compatible
+ * between UP and SMP.
+ */
+struct malloc_type {
+	struct malloc_type *ks_next;	/* next in list */
+	size_t 	ks_memuse[SMP_MAXCPU];	/* total memory held in bytes */
+	size_t	ks_loosememuse;		/* (inaccurate) aggregate memuse */
+	size_t	ks_limit;	/* most that are allowed to exist */
+	long	ks_size;	/* sizes of this thing that are allocated */
+	size_t	ks_inuse[SMP_MAXCPU]; /* # of allocs currently in use */
+	__int64_t ks_calls;	/* total packets of this type ever allocated */
+	long	ks_maxused;	/* maximum number ever used */
+	__uint32_t ks_magic;	/* if it's not magic, don't touch it */
+	const char *ks_shortdesc;	/* short description */
+	__uint16_t ks_limblocks; /* number of times blocked for hitting limit */
+	__uint16_t ks_mapblocks; /* number of times blocked for kernel map */
+	long	ks_reserved[4];	/* future use (module compatibility) */
+};
+
+typedef struct malloc_type	*malloc_type_t;
+
+typedef bool (objcache_ctor_fn)(void *obj, void *privdata, int ocflags);
 typedef void (objcache_dtor_fn)(void *obj, void *privdata);
 
 /*
@@ -72,7 +103,7 @@ void	 objcache_put(struct objcache *oc, void *obj);
 void	 objcache_dtor(struct objcache *oc, void *obj);
 void	 objcache_populate_linear(struct objcache *oc, void *elts, int nelts,
 				  int size);
-int objcache_reclaimlist(struct objcache *oc[], int nlist, int ocflags);
+bool objcache_reclaimlist(struct objcache *oc[], int nlist, int ocflags);
 void	 objcache_destroy(struct objcache *oc);
 
 #endif

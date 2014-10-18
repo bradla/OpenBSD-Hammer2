@@ -1,1 +1,0 @@
-#define	NRADIO	1

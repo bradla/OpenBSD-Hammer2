@@ -1,1 +1,0 @@
-#define	NCH	1

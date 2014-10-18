@@ -68,10 +68,18 @@
 #ifndef _SYS_NAMECACHE_H_
 #define	_SYS_NAMECACHE_H_
 
+#ifndef _SYS_TYPES_H_
 #include <sys/types.h>
+#endif
+#ifndef _SYS_QUEUE_H_
 #include <sys/queue.h>
+#endif
+//#ifndef _SYS_SPINLOCK_H_
 //#include <sys/spinlock.h>
+//#endif
+//#ifndef _SYS_THREAD_H_
 //#include <sys/thread.h>
+//#endif
 
 struct vnode;
 struct ucred;

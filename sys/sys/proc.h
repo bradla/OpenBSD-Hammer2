@@ -1,4 +1,4 @@
-/*	$OpenBSD: proc.h,v 1.184 2014/04/18 11:51:17 guenther Exp $	*/
+/*	$OpenBSD: proc.h,v 1.190 2014/07/13 16:41:21 claudio Exp $	*/
 /*	$NetBSD: proc.h,v 1.44 1996/04/22 01:23:21 christos Exp $	*/
 
 /*-
@@ -153,9 +153,6 @@ struct process {
 	 * the pid of the process. This is gross, but considering the horrible
 	 * pid semantics we have right now, it's unavoidable.
 	 */
-    	struct lwp  *td_lwp;        /* (optional) associated lwp */
-    	struct proc *td_proc;       /* (optional) associated process */
- 
 	struct	proc *ps_mainproc;
 	struct	ucred *ps_ucred;	/* Process owner's identity. */
 
@@ -169,6 +166,8 @@ struct process {
 
 	struct	sigacts *ps_sigacts;	/* Signal actions, state */
 	struct	vnode *ps_textvp;	/* Vnode of executable. */
+	struct	filedesc *ps_fd;	/* Ptr to open files structure */
+	struct	vmspace *ps_vmspace;	/* Address space */
 
 /* The following fields are all zeroed upon creation in process_new. */
 #define	ps_startzero	ps_klist
@@ -245,12 +244,16 @@ struct process {
 #define	PS_SINGLEUNWIND	0x00002000	/* Other threads must unwind. */
 #define	PS_NOZOMBIE	0x00004000	/* No signal or zombie at exit. */
 #define	PS_STOPPED	0x00008000	/* Just stopped, need sig to parent. */
+#define	PS_SYSTEM	0x00010000	/* No sigs, stats or swapping. */
+#define	PS_EMBRYO	0x00020000	/* New process, not yet fledged */
+#define	PS_ZOMBIE	0x00040000	/* Dead and ready to be waited for */
+#define	PS_NOBROADCASTKILL 0x00080000	/* Process excluded from kill -1. */
 
 #define	PS_BITS \
     ("\20\01CONTROLT\02EXEC\03INEXEC\04EXITING\05SUGID" \
      "\06SUGIDEXEC\07PPWAIT\010ISPWAIT\011PROFIL\012TRACED" \
      "\013WAITED\014COREDUMP\015SINGLEEXIT\016SINGLEUNWIND" \
-     "\017NOZOMBIE\020STOPPED")
+     "\017NOZOMBIE\020STOPPED\021SYSTEM\022EMBRYO\023ZOMBIE\024NOBROADCASTKILL")
 
 
 struct proc {
@@ -261,8 +264,8 @@ struct proc {
 	TAILQ_ENTRY(proc) p_thr_link;/* Threads in a process linkage. */
 
 	/* substructures: */
-	struct	filedesc *p_fd;		/* Ptr to open files structure. */
-	struct	vmspace *p_vmspace;	/* Address space. */
+	struct	filedesc *p_fd;		/* copy of p_p->ps_fd */
+	struct	vmspace *p_vmspace;	/* copy of p_p->ps_vmspace */
 #define	p_rlimit	p_p->ps_limit->pl_rlimit
 
 	int	p_flag;			/* P_* flags. */
@@ -287,8 +290,7 @@ struct proc {
 	const volatile void *p_wchan;/* Sleep address. */
 	struct	timeout p_sleep_to;/* timeout for tsleep() */
 	const char *p_wmesg;	 /* Reason for sleep. */
-	fixpt_t	p_pctcpu;	 /* %cpu for this thread during p_swtime */
-	u_int	p_swtime;	 /* Time swapped in or out. */
+	fixpt_t	p_pctcpu;	 /* %cpu for this thread */
 	u_int	p_slptime;	 /* Time since last blocked. */
 	u_int	p_uticks;		/* Statclock hits in user mode. */
 	u_int	p_sticks;		/* Statclock hits in system mode. */
@@ -344,15 +346,15 @@ struct proc {
 };
 
 /* Status values. */
-#define	SIDL	1		/* Process being created by fork. */
+#define	SIDL	1		/* Thread being created by fork. */
 #define	SRUN	2		/* Currently runnable. */
 #define	SSLEEP	3		/* Sleeping on an address. */
-#define	SSTOP	4		/* Process debugging or suspension. */
-#define	SZOMB	5		/* Awaiting collection by parent. */
-#define SDEAD	6		/* Process is almost a zombie. */
-#define	SONPROC	7		/* Process is currently on a CPU. */
+#define	SSTOP	4		/* Debugging or suspension. */
+#define	SZOMB	5		/* unused */
+#define	SDEAD	6		/* Thread is almost gone */
+#define	SONPROC	7		/* Thread is currently on a CPU. */
 
-#define P_ZOMBIE(p)	((p)->p_stat == SZOMB || (p)->p_stat == SDEAD)
+#define	P_ZOMBIE(p)	((p)->p_stat == SDEAD)
 
 /*
  * These flags are per-thread and kept in p_flag
@@ -418,6 +420,7 @@ struct uidinfo *uid_find(uid_t);
 #define FORK_IDLE	0x00000004
 #define FORK_PPWAIT	0x00000008
 #define FORK_SHAREFILES	0x00000010
+#define FORK_SYSTEM	0x00000020
 #define FORK_NOZOMBIE	0x00000040
 #define FORK_SHAREVM	0x00000080
 #define FORK_TFORK	0x00000100
@@ -449,8 +452,8 @@ extern struct processlist allprocess;	/* List of all processes. */
 extern struct processlist zombprocess;	/* List of zombie processes. */
 extern struct proclist allproc;		/* List of all threads. */
 
-extern struct proc *initproc;		/* Process slot for init. */
-extern struct proc *reaperproc;		/* Process slot for reaper. */
+extern struct process *initprocess;	/* Process slot for init. */
+extern struct proc *reaperproc;		/* Thread slot for reaper. */
 extern struct proc *syncerproc;		/* filesystem syncer daemon */
 
 extern struct pool process_pool;	/* memory pool for processes */
@@ -492,6 +495,7 @@ int	fork1(struct proc *, int, void *, pid_t *, void (*)(void *),
 	    void *, register_t *, struct proc **);
 int	groupmember(gid_t, struct ucred *);
 void	dorefreshcreds(struct process *, struct proc *);
+void	dosigsuspend(struct proc *, sigset_t);
 
 static inline void
 refreshcreds(struct proc *p)

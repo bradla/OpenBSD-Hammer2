@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_xxx.c,v 1.24 2014/03/26 05:23:42 guenther Exp $	*/
+/*	$OpenBSD: kern_xxx.c,v 1.27 2014/09/14 14:17:25 jsg Exp $	*/
 /*	$NetBSD: kern_xxx.c,v 1.32 1996/04/22 01:38:41 christos Exp $	*/
 
 /*
@@ -35,9 +35,7 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
-#include <sys/proc.h>
 #include <sys/reboot.h>
-#include <uvm/uvm_extern.h>
 #include <sys/sysctl.h>
 #include <sys/mount.h>
 #include <sys/syscallargs.h>
@@ -60,8 +58,18 @@ sys_reboot(struct proc *p, void *v, register_t *retval)
 	sched_stop_secondary_cpus();
 	KASSERT(CPU_IS_PRIMARY(curcpu()));
 #endif
-	boot(SCARG(uap, opt));
+	reboot(SCARG(uap, opt));
+	/* NOTREACHED */
 	return (0);
+}
+
+__dead void
+reboot(int howto)
+{
+	KASSERT((howto & RB_NOSYNC) || curproc != NULL);
+
+	boot(howto);
+	/* NOTREACHED */
 }
 
 #if !defined(NO_PROPOLICE)

@@ -35,6 +35,7 @@
 #ifndef _SYS_UCRED_H_
 #define	_SYS_UCRED_H_
 
+#define NGROUPS	16
 /*
  * Credentials.
  */

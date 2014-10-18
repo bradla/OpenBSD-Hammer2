@@ -1,4 +1,4 @@
-/*	$OpenBSD: tty_pty.c,v 1.65 2014/03/30 21:54:48 guenther Exp $	*/
+/*	$OpenBSD: tty_pty.c,v 1.68 2014/07/13 15:29:04 tedu Exp $	*/
 /*	$NetBSD: tty_pty.c,v 1.33.4.1 1996/06/02 09:08:11 mrg Exp $	*/
 
 /*
@@ -150,7 +150,7 @@ ptyarralloc(int nelem)
 {
 	struct pt_softc **pt;
 
-	pt = malloc(nelem * sizeof(struct pt_softc *), M_DEVBUF,
+	pt = mallocarray(nelem, sizeof(struct pt_softc *), M_DEVBUF,
 	    M_WAITOK|M_ZERO);
 	return pt;
 }
@@ -182,7 +182,7 @@ check_pty(int minor)
 		newpt = ptyarralloc(newnpty);
 
 		memcpy(newpt, pt_softc, npty * sizeof(struct pt_softc *));
-		free(pt_softc, M_DEVBUF);
+		free(pt_softc, M_DEVBUF, 0);
 		pt_softc = newpt;
 		npty = newnpty;
 	}
@@ -503,7 +503,7 @@ ptcread(dev_t dev, struct uio *uio, int flag)
 	}
 	ttwakeupwr(tp);
 	if (bufcc)
-		bzero(buf, bufcc);
+		explicit_bzero(buf, bufcc);
 	return (error);
 }
 
@@ -604,7 +604,7 @@ block:
 	uio->uio_resid += cc;
 done:
 	if (bufcc)
-		bzero(buf, bufcc);
+		explicit_bzero(buf, bufcc);
 	return (error);
 }
 

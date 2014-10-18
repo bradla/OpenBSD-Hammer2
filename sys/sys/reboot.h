@@ -1,4 +1,4 @@
-/*	$OpenBSD: reboot.h,v 1.14 2013/03/24 17:42:43 deraadt Exp $	*/
+/*	$OpenBSD: reboot.h,v 1.17 2014/07/11 14:36:44 uebayasi Exp $	*/
 /*	$NetBSD: reboot.h,v 1.9 1996/04/22 01:23:25 christos Exp $	*/
 
 /*
@@ -31,6 +31,9 @@
  *
  *	@(#)reboot.h	8.2 (Berkeley) 7/10/94
  */
+
+#ifndef _SYS_REBOOT_H_
+#define	_SYS_REBOOT_H_
 
 /*
  * Arguments to reboot system call.  These are passed to the boot program,
@@ -93,8 +96,10 @@
 #if	defined(_KERNEL) && !defined(_STANDALONE) && !defined(_LOCORE)
 
 __BEGIN_DECLS
-void	boot(int)
-    __attribute__((__noreturn__));
+__dead void	reboot(int);
+__dead void	boot(int);
 __END_DECLS
 
 #endif /* _KERNEL */
+
+#endif /* !_SYS_REBOOT_H_ */

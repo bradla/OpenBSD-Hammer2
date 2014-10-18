@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_bufq.c,v 1.26 2013/11/20 23:52:42 dlg Exp $	*/
+/*	$OpenBSD: kern_bufq.c,v 1.28 2014/07/12 18:43:32 tedu Exp $	*/
 /*
  * Copyright (c) 2010 Thordur I. Bjornsson <thib@openbsd.org>
  * Copyright (c) 2010 David Gwynne <dlg@openbsd.org>
@@ -258,8 +258,8 @@ void
 bufq_done(struct bufq *bq, struct buf *bp)
 {
 	mtx_enter(&bq->bufq_mtx);
+	KASSERT(bq->bufq_outstanding > 0);
 	bq->bufq_outstanding--;
-	KASSERT(bq->bufq_outstanding >= 0);
 	if (bq->bufq_stop && bq->bufq_outstanding == 0)
 		wakeup(&bq->bufq_outstanding);
 	if (bq->bufq_waiting && bq->bufq_outstanding < bq->bufq_low)
@@ -330,7 +330,7 @@ bufq_fifo_create(void)
 void
 bufq_fifo_destroy(void *data)
 {
-	free(data, M_DEVBUF);
+	free(data, M_DEVBUF, 0);
 }
 
 void
@@ -447,7 +447,7 @@ bufq_nscan_create(void)
 void
 bufq_nscan_destroy(void *vdata)
 {
-	free(vdata, M_DEVBUF);
+	free(vdata, M_DEVBUF, 0);
 }
 
 void

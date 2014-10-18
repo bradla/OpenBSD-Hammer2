@@ -36,13 +36,7 @@
 #ifndef _VFS_HAMMER2_DISK_H_
 #define _VFS_HAMMER2_DISK_H_
 
-/* XXX #ifndef _SYS_UUID_H_
-
-#endif
-#ifndef _SYS_DMSG_H_
 #include <sys/dmsg.h>
-#endif
-*/
 #include <sys/vnode.h>
 
 struct dmsg_vol_data {
@@ -104,11 +98,11 @@ typedef struct dmsg_vol_data dmsg_vol_data_t;
  * currently supports up to 8 copies, which brings the address space down
  * to 66 bits and gives us 2 bits of leeway.
  */
-#define HAMMER2_MIN_ALLOC	1024	/* minimum allocation size */
-#define HAMMER2_MIN_RADIX	10	/* minimum allocation size 2^N */
-#define HAMMER2_MAX_ALLOC	65536	/* maximum allocation size */
-#define HAMMER2_MAX_RADIX	16	/* maximum allocation size 2^N */
-#define HAMMER2_KEY_RADIX	64	/* number of bits in key */
+#define HAMMER2_ALLOC_MIN	1024	/* minimum allocation size */
+#define HAMMER2_RADIX_MIN	10	/* minimum allocation size 2^N */
+#define HAMMER2_ALLOC_MAX	65536	/* maximum allocation size */
+#define HAMMER2_RADIX_MAX	16	/* maximum allocation size 2^N */
+#define HAMMER2_RADIX_KEY	64	/* number of bits in key */
 
 /*
  * MINALLOCSIZE		- The minimum allocation size.  This can be smaller
@@ -207,40 +201,69 @@ typedef struct dmsg_vol_data dmsg_vol_data_t;
  *	+-----------------------+
  *
  * The first few 2GB zones contain volume headers and volume header backups.
- * After that the volume header block# is reserved.
+ * After that the volume header block# is reserved for future use.  Similarly,
+ * there are many blocks related to various Freemap levels which are not
+ * used in every segment and those are also reserved for future use.
  *
  *			Freemap (see the FREEMAP document)
  *
- * The freemap utilizes blocks #1-16 for now, see the FREEMAP document.
- * The filesystems rotations through the sections to avoid disturbing the
- * 'previous' version of the freemap during a flush.
+ * The freemap utilizes blocks #1-16 in 8 sets of 4 blocks.  Each block in
+ * a set represents a level of depth in the freemap topology.  Eight sets
+ * exist to prevent live updates from disturbing the state of the freemap
+ * were a crash/reboot to occur.  That is, a live update is not committed
+ * until the update's flush reaches the volume root.  There are FOUR volume
+ * roots representing the last four synchronization points, so the freemap
+ * must be consistent no matter which volume root is chosen by the mount
+ * code.
  *
- * Each freemap section is 4 x 64K blocks and represents 2GB, 2TB, 2PB,
- * and 2EB indirect map, plus the volume header has a set of 8 blockrefs
- * for another 3 bits for a total of 64 bits of address space.  The Level 0
- * 64KB block representing 2GB of storage is a hammer2_bmap_data[1024].
- * Each element contains a 128x2 bit bitmap representing 16KB per chunk for
- * 2MB of storage (x1024 elements = 2GB).  2 bits per chunk:
+ * Each freemap set is 4 x 64K blocks and represents the 2GB, 2TB, 2PB,
+ * and 2EB indirect map.  The volume header itself has a set of 8 freemap
+ * blockrefs representing another 3 bits, giving us a total 64 bits of
+ * representable address space.
+ *
+ * The Level 0 64KB block represents 2GB of storage represented by
+ * (64 x struct hammer2_bmap_data).  Each structure represents 2MB of storage
+ * and has a 256 bit bitmap, using 2 bits to represent a 16KB chunk of
+ * storage.  These 2 bits represent the following states:
  *
  *	00	Free
- *	01	(reserved)
+ *	01	(reserved) (Possibly partially allocated)
  *	10	Possibly free
  *	11	Allocated
  *
  * One important thing to note here is that the freemap resolution is 16KB,
- * but the minimuim storage allocation size is 1KB.  The hammer2 vfs keeps
- * track of sub-allocations in memory (on umount or reboot obvious the whole
- * 16KB will be considered allocated even if only 1KB is allocated).  It is
- * possible for fragmentation to build up over time.
+ * but the minimum storage allocation size is 1KB.  The hammer2 vfs keeps
+ * track of sub-allocations in memory, which means that on a unmount or reboot
+ * the entire 16KB of a partially allocated block will be considered fully
+ * allocated.  It is possible for fragmentation to build up over time, but
+ * defragmentation is fairly easy to accomplish since all modifications
+ * allocate a new block.
  *
  * The Second thing to note is that due to the way snapshots and inode
  * replication works, deleting a file cannot immediately free the related
- * space.  Instead, the freemap elements transition from 11->10.  The bulk
- * freeing code which does a complete scan is then responsible for
- * transitioning the elements to 00 or back to 11 or to 01 for that matter.
+ * space.  Furthermore, deletions often do not bother to traverse the
+ * block subhierarchy being deleted.  And to go even further, whole
+ * sub-directory trees can be deleted simply by deleting the directory inode
+ * at the top.  So even though we have a symbol to represent a 'possibly free'
+ * block (binary 10), only the bulk free scanning code can actually use it.
+ * Normal 'rm's or other deletions do not.
  *
  * WARNING!  ZONE_SEG and VOLUME_ALIGN must be a multiple of 1<<LEVEL0_RADIX
  *	     (i.e. a multiple of 2MB).  VOLUME_ALIGN must be >= ZONE_SEG.
+ *
+ * In Summary:
+ *
+ * (1) Modifications to freemap blocks 'allocate' a new copy (aka use a block
+ *     from the next set).  The new copy is reused until a flush occurs at
+ *     which point the next modification will then rotate to the next set.
+ *
+ * (2) A total of 10 freemap sets is required.
+ *
+ *     - 8 sets - 2 sets per volume header backup x 4 volume header backups
+ *     - 2 sets used as backing store for the bulk freemap scan.
+ *     - The freemap recovery scan which runs on-mount just uses the inactive
+ *	 set for whichever volume header was selected by the mount code.
+ *
  */
 #define HAMMER2_VOLUME_ALIGN		(8 * 1024 * 1024)
 #define HAMMER2_VOLUME_ALIGN64		((hammer2_off_t)HAMMER2_VOLUME_ALIGN)
@@ -258,73 +281,19 @@ typedef struct dmsg_vol_data dmsg_vol_data_t;
 #define HAMMER2_ZONE_SEG64		((hammer2_off_t)HAMMER2_ZONE_SEG)
 #define HAMMER2_ZONE_BLOCKS_SEG		(HAMMER2_ZONE_SEG / HAMMER2_PBUFSIZE)
 
-/*
- * 64 x 64KB blocks are reserved at the base of each 2GB zone.  These blocks
- * are used to store the volume header or volume header backups, allocation
- * tree, and other information in the future.
- *
- * All specified blocks are not necessarily used in all 2GB zones.  However,
- * dead areas are reserved for future use and MUST NOT BE USED for other
- * purposes.
- *
- * The freemap is arranged into 15 groups of 4x64KB each.  The 4 sub-groups
- * are labeled ZONEFM1..4 and representing HAMMER2_FREEMAP_LEVEL{1-4}_RADIX,
- * for the up to 4 levels of radix tree representing the freemap.  For
- * simplicity we are reserving all four radix tree layers even though the
- * higher layers do not require teh reservation at each 2GB mark.  That
- * space is reserved for future use.
- *
- * Freemap blocks are not allocated dynamically but instead rotate through
- * one of 15 possible copies.  We require 15 copies for several reasons:
- *
- * (1) For distinguishing freemap 'allocations' made by the current flush
- *     verses the concurrently running front-end (at flush_tid + 1).  This
- *     theoretically requires two copies but the algorithm is greatly
- *     simplified if we use three.
- *
- * (2) There are up to 4 copies of the volume header (iterated on each flush),
- *     and if the mount code is forced to use an older copy due to corruption
- *     we must be sure that the state of the freemap AS-OF the earlier copy
- *     remains valid.
- *
- *     This means 3 copies x 4 flushes = 12 copies to be able to mount any
- *     of the four volume header backups after on boot or after a crash.
- *
- * (3) Freemap recovery on-mount eats a copy.  We don't want freemap recovery
- *     to blow away the copy used by some other volume header in case H2
- *     crashes during the recovery.  Total is now 13.
- *
- * (4) And I want some breathing room to ensure that complex flushes do not
- *     cause problems.  Also note that bulk block freeing itself must be
- *     careful so even on a live system, post-mount, the four volume header
- *     backups effectively represent short-lived snapshots.  And I only
- *     have room for 15 copies so it works out.
- *
- * Preferably I would like to improve the algorithm to only use 2 copies per
- * volume header (which would be a total of 2 x 4 = 8 + 1 for freemap recovery
- * + 1 for breathing room = 10 total instead of 15).  For now we use 15.
- */
 #define HAMMER2_ZONE_VOLHDR		0	/* volume header or backup */
-#define HAMMER2_ZONE_FREEMAP_00		1
-#define HAMMER2_ZONE_FREEMAP_01		5
-#define HAMMER2_ZONE_FREEMAP_02		9
-#define HAMMER2_ZONE_FREEMAP_03		13
-#define HAMMER2_ZONE_FREEMAP_04		17
-#define HAMMER2_ZONE_FREEMAP_05		21
-#define HAMMER2_ZONE_FREEMAP_06		25
-#define HAMMER2_ZONE_FREEMAP_07		29
-#define HAMMER2_ZONE_FREEMAP_08		33
-#define HAMMER2_ZONE_FREEMAP_09		37
-#define HAMMER2_ZONE_FREEMAP_10		41
-#define HAMMER2_ZONE_FREEMAP_11		45
-#define HAMMER2_ZONE_FREEMAP_12		49
-#define HAMMER2_ZONE_FREEMAP_13		53
-#define HAMMER2_ZONE_FREEMAP_14		57
-#define HAMMER2_ZONE_FREEMAP_END	61	/* (non-inclusive) */
+#define HAMMER2_ZONE_FREEMAP_00		1	/* normal freemap rotation */
+#define HAMMER2_ZONE_FREEMAP_01		5	/* normal freemap rotation */
+#define HAMMER2_ZONE_FREEMAP_02		9	/* normal freemap rotation */
+#define HAMMER2_ZONE_FREEMAP_03		13	/* normal freemap rotation */
+#define HAMMER2_ZONE_FREEMAP_04		17	/* normal freemap rotation */
+#define HAMMER2_ZONE_FREEMAP_05		21	/* normal freemap rotation */
+#define HAMMER2_ZONE_FREEMAP_06		25	/* batch freeing code only */
+#define HAMMER2_ZONE_FREEMAP_07		29	/* batch freeing code only */
+#define HAMMER2_ZONE_FREEMAP_08		33	/* (non-inclusive) */
 #define HAMMER2_ZONE_UNUSED62		62
 #define HAMMER2_ZONE_UNUSED63		63
 
-#define HAMMER2_ZONE_FREEMAP_COPIES	15
 						/* relative to FREEMAP_x */
 #define HAMMER2_ZONEFM_LEVEL1		0	/* 2GB leafmap */
 #define HAMMER2_ZONEFM_LEVEL2		1	/* 2TB indmap */
@@ -382,12 +351,12 @@ typedef uint32_t hammer2_crc32_t;
 /*
  * Miscellanious ranges (all are unsigned).
  */
-#define HAMMER2_MIN_TID		1ULL
-#define HAMMER2_MAX_TID		0xFFFFFFFFFFFFFFFFULL
-#define HAMMER2_MIN_KEY		0ULL
-#define HAMMER2_MAX_KEY		0xFFFFFFFFFFFFFFFFULL
-#define HAMMER2_MIN_OFFSET	0ULL
-#define HAMMER2_MAX_OFFSET	0xFFFFFFFFFFFFFFFFULL
+#define HAMMER2_TID_MIN		1ULL
+#define HAMMER2_TID_MAX		0xFFFFFFFFFFFFFFFFULL
+#define HAMMER2_KEY_MIN		0ULL
+#define HAMMER2_KEY_MAX		0xFFFFFFFFFFFFFFFFULL
+#define HAMMER2_OFFSET_MIN	0ULL
+#define HAMMER2_OFFSET_MAX	0xFFFFFFFFFFFFFFFFULL
 
 /*
  * HAMMER2 data offset special cases and masking.
@@ -400,7 +369,7 @@ typedef uint32_t hammer2_crc32_t;
  * to as a power of 2.  The theoretical minimum radix is thus 6 (The space
  * needed in the low bits of the data offset field).  However, the practical
  * minimum allocation chunk size is 1KB (a radix of 10), so HAMMER2 sets
- * HAMMER2_MIN_RADIX to 10.  The maximum radix is currently 16 (64KB), but
+ * HAMMER2_RADIX_MIN to 10.  The maximum radix is currently 16 (64KB), but
  * we fully intend to support larger extents in the future.
  */
 #define HAMMER2_OFF_BAD		((hammer2_off_t)-1)
@@ -420,6 +389,75 @@ typedef uint32_t hammer2_crc32_t;
 #define HAMMER2_DIRHASH_FORCED	0x0000000000008000ULL	/* bit forced on */
 
 #define HAMMER2_SROOT_KEY	0x0000000000000000ULL	/* volume to sroot */
+
+/************************************************************************
+ *				DMSG SUPPORT				*
+ ************************************************************************
+ * LNK_VOLCONF
+ *
+ * All HAMMER2 directories directly under the super-root on your local
+ * media can be mounted separately, even if they share the same physical
+ * device.
+ *
+ * When you do a HAMMER2 mount you are effectively tying into a HAMMER2
+ * cluster via local media.  The local media does not have to participate
+ * in the cluster, other than to provide the hammer2_volconf[] array and
+ * root inode for the mount.
+ *
+ * This is important: The mount device path you specify serves to bootstrap
+ * your entry into the cluster, but your mount will make active connections
+ * to ALL copy elements in the hammer2_volconf[] array which match the
+ * PFSID of the directory in the super-root that you specified.  The local
+ * media path does not have to be mentioned in this array but becomes part
+ * of the cluster based on its type and access rights.  ALL ELEMENTS ARE
+ * TREATED ACCORDING TO TYPE NO MATTER WHICH ONE YOU MOUNT FROM.
+ *
+ * The actual cluster may be far larger than the elements you list in the
+ * hammer2_volconf[] array.  You list only the elements you wish to
+ * directly connect to and you are able to access the rest of the cluster
+ * indirectly through those connections.
+ *
+ * WARNING!  This structure must be exactly 128 bytes long for its config
+ *	     array to fit in the volume header.
+ */
+struct hammer2_volconf {
+	uint8_t	copyid;		/* 00	 copyid 0-255 (must match slot) */
+	uint8_t inprog;		/* 01	 operation in progress, or 0 */
+	uint8_t chain_to;	/* 02	 operation chaining to, or 0 */
+	uint8_t chain_from;	/* 03	 operation chaining from, or 0 */
+	uint16_t flags;		/* 04-05 flags field */
+	uint8_t error;		/* 06	 last operational error */
+	uint8_t priority;	/* 07	 priority and round-robin flag */
+	uint8_t remote_pfs_type;/* 08	 probed direct remote PFS type */
+	uint8_t reserved08[23];	/* 09-1F */
+	uuid_t	pfs_clid;	/* 20-2F copy target must match this uuid */
+	uint8_t label[16];	/* 30-3F import/export label */
+	uint8_t path[64];	/* 40-7F target specification string or key */
+};
+
+typedef struct hammer2_volconf hammer2_volconf_t;
+
+#define DMSG_VOLF_ENABLED	0x0001
+#define DMSG_VOLF_INPROG	0x0002
+#define DMSG_VOLF_CONN_RR	0x80	/* round-robin at same priority */
+#define DMSG_VOLF_CONN_EF	0x40	/* media errors flagged */
+#define DMSG_VOLF_CONN_PRI	0x0F	/* select priority 0-15 (15=best) */
+
+struct dmsg_lnk_hammer2_volconf {
+	dmsg_hdr_t		head;
+	hammer2_volconf_t	copy;	/* copy spec */
+	int32_t			index;
+	int32_t			unused01;
+	uuid_t			mediaid;
+	int64_t			reserved02[32];
+};
+
+typedef struct dmsg_lnk_hammer2_volconf dmsg_lnk_hammer2_volconf_t;
+
+#define DMSG_LNK_HAMMER2_VOLCONF DMSG_LNK(DMSG_LNK_CMD_HAMMER2_VOLCONF, \
+					  dmsg_lnk_hammer2_volconf)
+
+#define H2_LNK_VOLCONF(msg)	((dmsg_lnk_hammer2_volconf_t *)(msg)->any.buf)
 
 /*
  * The media block reference structure.  This forms the core of the HAMMER2
@@ -450,6 +488,21 @@ typedef uint32_t hammer2_crc32_t;
  *	 ((key) + (1LL << keybits) - 1).  HAMMER2 usually populates
  *	 blocks bottom-up, inserting a new root when radix expansion
  *	 is required.
+ *
+ * --
+ *				FUTURE BLOCKREF EXPANSION
+ *
+ * In order to implement a 256-bit content addressable index we want to
+ * have a 256-bit key which essentially represents the cryptographic hash.
+ * (so, 64-bit key + 192-bit crypto-hash or 256-bit key-is-the-hash +
+ * 32-bit consistency check for indirect block layers).
+ *
+ * THIS IS POSSIBLE in a 64-byte blockref structure.  Of course, any number
+ * of bits can be represented by sizing the blockref.  For the purposes of
+ * HAMMER2 though my limit is 256 bits.  Not only that, but it will be an
+ * optimal construction because H2 already uses a variably-sized radix to
+ * pack the blockrefs at each level.  A 256-bit mechanic would allow us
+ * to implement a content-addressable index.
  */
 struct hammer2_blockref {		/* MUST BE EXACTLY 64 BYTES */
 	uint8_t		type;		/* type of underlying item */
@@ -494,24 +547,10 @@ struct hammer2_blockref {		/* MUST BE EXACTLY 64 BYTES */
 			uint64_t avail;		/* total available bytes */
 			uint64_t unused;	/* unused must be 0 */
 		} freemap;
-
-		/*
-		 * Debugging
-		 */
-		struct {
-			hammer2_tid_t sync_tid;
-		} debug;
 	} check;
 };
 
 typedef struct hammer2_blockref hammer2_blockref_t;
-
-#if 0
-#define HAMMER2_BREF_SYNC1		0x01	/* modification synchronized */
-#define HAMMER2_BREF_SYNC2		0x02	/* modification committed */
-#define HAMMER2_BREF_DESYNCCHLD		0x04	/* desynchronize children */
-#define HAMMER2_BREF_DELETED		0x80	/* indicates a deletion */
-#endif
 
 #define HAMMER2_BLOCKREF_BYTES		64	/* blockref struct in bytes */
 
@@ -528,18 +567,38 @@ typedef struct hammer2_blockref hammer2_blockref_t;
 #define HAMMER2_BREF_TYPE_FREEMAP	254	/* pseudo-type */
 #define HAMMER2_BREF_TYPE_VOLUME	255	/* pseudo-type */
 
-#define HAMMER2_ENC_CHECK(n)		((n) << 4)
+#define HAMMER2_BREF_FLAG_PFSROOT	0x01	/* see also related opflag */
+#define HAMMER2_BREF_FLAG_ZERO		0x02
+
+/*
+ * Encode/decode check mode and compression mode for
+ * bref.methods.  The compression level is not encoded in
+ * bref.methods.
+ */
+#define HAMMER2_ENC_CHECK(n)		(((n) & 15) << 4)
 #define HAMMER2_DEC_CHECK(n)		(((n) >> 4) & 15)
+#define HAMMER2_ENC_COMP(n)		((n) & 15)
+#define HAMMER2_DEC_COMP(n)		((n) & 15)
 
 #define HAMMER2_CHECK_NONE		0
-#define HAMMER2_CHECK_ISCSI32		1
-#define HAMMER2_CHECK_CRC64		2
-#define HAMMER2_CHECK_SHA192		3
-#define HAMMER2_CHECK_FREEMAP		4
+#define HAMMER2_CHECK_DISABLED		1
+#define HAMMER2_CHECK_ISCSI32		2
+#define HAMMER2_CHECK_CRC64		3
+#define HAMMER2_CHECK_SHA192		4
+#define HAMMER2_CHECK_FREEMAP		5
 
-#define HAMMER2_ENC_COMP(n)		(n)
+/* user-specifiable check modes only */
+#define HAMMER2_CHECK_STRINGS		{ "none", "disabled", "crc32", \
+					  "crc64", "sha192" }
+#define HAMMER2_CHECK_STRINGS_COUNT	5
+
+/*
+ * Encode/decode check or compression algorithm request in
+ * ipdata->check_algo and ipdata->comp_algo.
+ */
+#define HAMMER2_ENC_ALGO(n)		(n)
+#define HAMMER2_DEC_ALGO(n)		((n) & 15)
 #define HAMMER2_ENC_LEVEL(n)		((n) << 4)
-#define HAMMER2_DEC_COMP(n)		((n) & 15)
 #define HAMMER2_DEC_LEVEL(n)		(((n) >> 4) & 15)
 
 #define HAMMER2_COMP_NONE		0
@@ -592,8 +651,8 @@ typedef struct hammer2_blockset hammer2_blockset_t;
 #if (1 << HAMMER2_PBUFRADIX) != HAMMER2_PBUFSIZE
 #error "HAMMER2_PBUFRADIX and HAMMER2_PBUFSIZE are inconsistent"
 #endif
-#if (1 << HAMMER2_MIN_RADIX) != HAMMER2_MIN_ALLOC
-#error "HAMMER2_MIN_RADIX and HAMMER2_MIN_ALLOC are inconsistent"
+#if (1 << HAMMER2_RADIX_MIN) != HAMMER2_ALLOC_MIN
+#error "HAMMER2_RADIX_MIN and HAMMER2_ALLOC_MIN are inconsistent"
 #endif
 
 /*
@@ -707,19 +766,6 @@ typedef struct hammer2_bmap_data hammer2_bmap_data_t;
 
 #define HAMMER2_INODE_HIDDENDIR		16	/* special inode */
 #define HAMMER2_INODE_START		1024	/* dynamically allocated */
-//typedef uint64_t  uuid_t;   
-/*struct uuid {
-        uint32_t        time_low;
-        uint16_t        time_mid;
-        uint16_t        time_hi_and_version;
-        uint8_t         clock_seq_hi_and_reserved;
-        uint8_t         clock_seq_low;
-        uint8_t         node[6];
-};
-
-typedef struct uuid uuid_t;
-*/
-
 
 struct hammer2_inode_data {
 	uint16_t	version;	/* 0000 inode data version */
@@ -735,7 +781,7 @@ struct hammer2_inode_data {
 	uint64_t	mtime;		/* 0018 modified time */
 	uint64_t	atime;		/* 0020 access time (unsupported) */
 	uint64_t	btime;		/* 0028 birth time */
-	uuid_t 		uid;		/* 0030 uid / degenerate unix uid */
+	uuid_t		uid;		/* 0030 uid / degenerate unix uid */
 	uuid_t		gid;		/* 0040 gid / degenerate unix gid */
 
 	uint8_t		type;		/* 0050 object type */
@@ -766,15 +812,17 @@ struct hammer2_inode_data {
 	 *	 registration in the cluster.
 	 */
 	uint8_t		target_type;	/* 0084 hardlink target type */
-	uint8_t		reserved85;	/* 0085 */
-	uint8_t		reserved86;	/* 0086 */
+	uint8_t		check_algo;	/* 0085 check code request & algo */
+	uint8_t		pfs_nmasters;	/* 0086 (if PFSROOT) if multi-master */
 	uint8_t		pfs_type;	/* 0087 (if PFSROOT) node type */
 	uint64_t	pfs_inum;	/* 0088 (if PFSROOT) inum allocator */
 	uuid_t		pfs_clid;	/* 0090 (if PFSROOT) cluster uuid */
 	uuid_t		pfs_fsid;	/* 00A0 (if PFSROOT) unique uuid */
 
 	/*
-	 * Quotas and cumulative sub-tree counters.
+	 * Quotas and aggregate sub-tree inode and data counters.  Note that
+	 * quotas are not replicated downward, they are explicitly set by
+	 * the sysop and in-memory structures keep track of inheritence.
 	 */
 	hammer2_key_t	data_quota;	/* 00B0 subtree quota in bytes */
 	hammer2_key_t	data_count;	/* 00B8 subtree byte count */
@@ -787,8 +835,10 @@ struct hammer2_inode_data {
 	 * Tracks (possibly degenerate) free areas covering all sub-tree
 	 * allocations under inode, not counting the inode itself.
 	 * 0/0 indicates empty entry.  fully set-associative.
+	 *
+	 * (not yet implemented)
 	 */
-	hammer2_off_t	freezones[4];	/* 00E0/E8/F0/F8 base|radix */
+	hammer2_off_t	reservedE0[4];	/* 00E0/E8/F0/F8 */
 
 	unsigned char	filename[HAMMER2_INODE_MAXNAME];
 					/* 0100-01FF (256 char, unterminated) */
@@ -801,7 +851,7 @@ struct hammer2_inode_data {
 typedef struct hammer2_inode_data hammer2_inode_data_t;
 
 #define HAMMER2_OPFLAG_DIRECTDATA	0x01
-#define HAMMER2_OPFLAG_PFSROOT		0x02
+#define HAMMER2_OPFLAG_PFSROOT		0x02	/* (see also bref flag) */
 #define HAMMER2_OPFLAG_COPYIDS		0x04	/* copyids override parent */
 
 #define HAMMER2_OBJTYPE_UNKNOWN		0
@@ -818,31 +868,23 @@ typedef struct hammer2_inode_data hammer2_inode_data_t;
 #define HAMMER2_COPYID_NONE		0
 #define HAMMER2_COPYID_LOCAL		((uint8_t)-1)
 
-/*
- * PEER types identify connections and help cluster controller filter
- * out unwanted SPANs.
- */
-#define HAMMER2_PEER_NONE		DMSG_PEER_NONE
-#define HAMMER2_PEER_CLUSTER		DMSG_PEER_CLUSTER
-#define HAMMER2_PEER_BLOCK		DMSG_PEER_BLOCK
-#define HAMMER2_PEER_HAMMER2		DMSG_PEER_HAMMER2
-
-#define HAMMER2_COPYID_COUNT		DMSG_COPYID_COUNT
+#define HAMMER2_COPYID_COUNT		256
 
 /*
  * PFS types identify a PFS on media and in LNK_SPAN messages.
+ *
+ * PFS types >= 16 belong to HAMMER, 0-15 are defined in sys/dmsg.h
  */
-#define HAMMER2_PFSTYPE_NONE		DMSG_PFSTYPE_NONE
-#define HAMMER2_PFSTYPE_ADMIN		DMSG_PFSTYPE_ADMIN
-#define HAMMER2_PFSTYPE_CLIENT		DMSG_PFSTYPE_CLIENT
-#define HAMMER2_PFSTYPE_CACHE		DMSG_PFSTYPE_CACHE
-#define HAMMER2_PFSTYPE_COPY		DMSG_PFSTYPE_COPY
-#define HAMMER2_PFSTYPE_SLAVE		DMSG_PFSTYPE_SLAVE
-#define HAMMER2_PFSTYPE_SOFT_SLAVE	DMSG_PFSTYPE_SOFT_SLAVE
-#define HAMMER2_PFSTYPE_SOFT_MASTER	DMSG_PFSTYPE_SOFT_MASTER
-#define HAMMER2_PFSTYPE_MASTER		DMSG_PFSTYPE_MASTER
-#define HAMMER2_PFSTYPE_SNAPSHOT	DMSG_PFSTYPE_SNAPSHOT
-#define HAMMER2_PFSTYPE_MAX		DMSG_PFSTYPE_MAX
+/* 0-15 reserved by sys/dmsg.h */
+#define HAMMER2_PFSTYPE_CACHE		16
+#define HAMMER2_PFSTYPE_COPY		17
+#define HAMMER2_PFSTYPE_SLAVE		18
+#define HAMMER2_PFSTYPE_SOFT_SLAVE	19
+#define HAMMER2_PFSTYPE_SOFT_MASTER	20
+#define HAMMER2_PFSTYPE_MASTER		21
+#define HAMMER2_PFSTYPE_SNAPSHOT	22
+#define HAMMER2_PFSTYPE_SUPROOT		23
+#define HAMMER2_PFSTYPE_MAX		32
 
 /*
  *				Allocation Table
@@ -955,9 +997,17 @@ struct hammer2_volume_data {
 	hammer2_off_t	allocator_size;		/* 0060 Total data space */
 	hammer2_off_t   allocator_free;		/* 0068	Free space */
 	hammer2_off_t	allocator_beg;		/* 0070 Initial allocations */
+
+	/*
+	 * mirror_tid reflects the highest committed super-root change
+	 * freemap_tid reflects the highest committed freemap change
+	 *
+	 * NOTE: mirror_tid does not track (and should not track) changes
+	 *	 made to or under PFS roots.
+	 */
 	hammer2_tid_t	mirror_tid;		/* 0078 committed tid (vol) */
-	hammer2_tid_t	alloc_tid;		/* 0080 Alloctable modify tid */
-	hammer2_tid_t	inode_tid;		/* 0088 Inode allocator tid */
+	hammer2_tid_t	reserved0080;		/* 0080 */
+	hammer2_tid_t	reserved0088;		/* 0088 */
 	hammer2_tid_t	freemap_tid;		/* 0090 committed tid (fmap) */
 	hammer2_tid_t	bulkfree_tid;		/* 0098 bulkfree incremental */
 	hammer2_tid_t	reserved00A0[5];	/* 00A0-00C7 */
@@ -1017,7 +1067,7 @@ struct hammer2_volume_data {
 	 * indexes into this array.
 	 */
 						/* 1000-8FFF copyinfo config */
-	dmsg_vol_data_t	copyinfo[HAMMER2_COPYID_COUNT];
+	hammer2_volconf_t copyinfo[HAMMER2_COPYID_COUNT];
 
 	/*
 	 * Remaining sections are reserved for future use.

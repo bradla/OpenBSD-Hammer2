@@ -1,4 +1,4 @@
-/*	$OpenBSD: subr_poison.c,v 1.6 2014/01/13 09:27:39 mpi Exp $ */
+/*	$OpenBSD: subr_poison.c,v 1.12 2014/09/27 12:23:41 tedu Exp $ */
 /*
  * Copyright (c) 2013 Ted Unangst <tedu@openbsd.org>
  *
@@ -18,6 +18,7 @@
 #include <sys/types.h>
 #include <sys/param.h>
 #include <sys/malloc.h>
+
 #include <uvm/uvm_extern.h>
 
 /*
@@ -36,14 +37,24 @@
 #endif
 #define POISON_SIZE	64
 
-int32_t
+uint32_t
 poison_value(void *v)
 {
 	ulong l = (u_long)v;
 
 	l = l >> PAGE_SHIFT;
 
-	return (l & 1) ? POISON0 : POISON1;
+	switch (l & 3) {
+	case 0:
+		return POISON0;
+	case 1:
+		return POISON1;
+	case 2:
+		return (POISON0 & 0xffff0000) | (~POISON0 & 0x0000ffff);
+	case 3:
+		return (POISON1 & 0xffff0000) | (~POISON1 & 0x0000ffff);
+	}
+	return 0;
 }
 
 void
@@ -51,7 +62,7 @@ poison_mem(void *v, size_t len)
 {
 	uint32_t *ip = v;
 	size_t i;
-	int32_t poison;
+	uint32_t poison;
 
 	poison = poison_value(v);
 
@@ -63,11 +74,11 @@ poison_mem(void *v, size_t len)
 }
 
 int
-poison_check(void *v, size_t len, size_t *pidx, int *pval)
+poison_check(void *v, size_t len, size_t *pidx, uint32_t *pval)
 {
 	uint32_t *ip = v;
 	size_t i;
-	int32_t poison;
+	uint32_t poison;
 
 	poison = poison_value(v);
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: tty.c,v 1.105 2014/03/22 06:05:45 guenther Exp $	*/
+/*	$OpenBSD: tty.c,v 1.114 2014/09/15 19:08:21 miod Exp $	*/
 /*	$NetBSD: tty.c,v 1.68.4.2 1996/06/06 16:04:52 thorpej Exp $	*/
 
 /*-
@@ -46,7 +46,6 @@
 #undef	TTYDEFCHARS
 #include <sys/file.h>
 #include <sys/conf.h>
-#include <sys/dkstat.h>
 #include <sys/uio.h>
 #include <sys/kernel.h>
 #include <sys/vnode.h>
@@ -60,7 +59,6 @@
 
 #include <sys/namei.h>
 
-#include <uvm/uvm_extern.h>
 #include <dev/rndvar.h>
 
 #include "pty.h"
@@ -70,7 +68,6 @@ static void ttyblock(struct tty *);
 void ttyunblock(struct tty *);
 static void ttyecho(int, struct tty *);
 static void ttyrubo(struct tty *, int);
-static int proc_compare(struct proc *, struct proc *);
 void	ttkqflush(struct klist *klist);
 int	filt_ttyread(struct knote *kn, long hint);
 void 	filt_ttyrdetach(struct knote *kn);
@@ -181,7 +178,7 @@ ttyopen(dev_t device, struct tty *tp, struct proc *p)
 	tp->t_dev = device;
 	if (!ISSET(tp->t_state, TS_ISOPEN)) {
 		SET(tp->t_state, TS_ISOPEN);
-		bzero(&tp->t_winsize, sizeof(tp->t_winsize));
+		memset(&tp->t_winsize, 0, sizeof(tp->t_winsize));
 		tp->t_column = 0;
 	}
 	CLR(tp->t_state, TS_WOPEN);
@@ -1643,7 +1640,7 @@ read:
 out:
 	if (stime) {
 		timeout_del(stime);
-		free(stime, M_TEMP);
+		free(stime, M_TEMP, 0);
 	}
 	return (error);
 }
@@ -1852,7 +1849,7 @@ out:
 	uio->uio_resid += cc;
 done:
 	if (obufcc)
-		bzero(obuf, obufcc);
+		explicit_bzero(obuf, obufcc);
 	return (error);
 
 overfull:
@@ -1879,7 +1876,7 @@ ovhiwat:
 		splx(s);
 		uio->uio_resid += cc;
 		if (obufcc)
-			bzero(obuf, obufcc);
+			explicit_bzero(obuf, obufcc);
 		return (uio->uio_resid == cnt ? EWOULDBLOCK : 0);
 	}
 	SET(tp->t_state, TS_ASLEEP);
@@ -2106,13 +2103,36 @@ ttsetwater(struct tty *tp)
 }
 
 /*
+ * Get the total estcpu for a process, summing across threads.
+ * Returns true if at least one thread is runnable/running.
+ */
+static int
+process_sum(struct process *pr, fixpt_t *estcpup)
+{
+	struct proc *p;
+	fixpt_t estcpu;
+	int ret;
+
+	ret = 0;
+	estcpu = 0;
+	TAILQ_FOREACH(p, &pr->ps_threads, p_thr_link) {
+		if (p->p_stat == SRUN || p->p_stat == SONPROC)
+			ret = 1;
+		estcpu += p->p_pctcpu;
+	}
+
+	*estcpup = estcpu;
+	return (ret);
+}
+
+/*
  * Report on state of foreground process group.
  */
 void
 ttyinfo(struct tty *tp)
 {
-	struct process *pr;
-	struct proc *pick;
+	struct process *pr, *pickpr;
+	struct proc *p, *pick;
 	struct timespec utime, stime;
 	int tmp;
 
@@ -2128,22 +2148,53 @@ ttyinfo(struct tty *tp)
 	else if (tp->t_pgrp == NULL)
 		ttyprintf(tp, "no foreground process group\n");
 	else if ((pr = LIST_FIRST(&tp->t_pgrp->pg_members)) == NULL)
-		ttyprintf(tp, "empty foreground process group\n");
+empty:		ttyprintf(tp, "empty foreground process group\n");
 	else {
-		int pctcpu;
+		const char *state;
+		fixpt_t pctcpu, pctcpu2;
+		int run, run2;
+		int calc_pctcpu;
 		long rss;
 
-		/* Pick interesting process. */
-		for (pick = NULL; pr != NULL; pr = LIST_NEXT(pr, ps_pglist))
-			if (proc_compare(pick, pr->ps_mainproc))
-				pick = pr->ps_mainproc;
+		/*
+		 * Pick the most active process:
+		 *  - prefer at least one running/runnable thread
+		 *  - prefer higher total pctcpu
+		 *  - prefer non-zombie
+		 * Otherwise take the most recently added to this process group
+		 */
+		pickpr = pr;
+		run = process_sum(pickpr, &pctcpu);
+		while ((pr = LIST_NEXT(pr, ps_pglist)) != NULL) {
+			run2 = process_sum(pr, &pctcpu2);
+			if (run) {
+				/*
+				 * pick is running; is p running w/same or
+				 * more cpu?
+				 */
+				if (run2 && pctcpu2 >= pctcpu)
+					goto update_pickpr;
+				continue;
+			}
+			/* pick isn't running; is p running *or* w/more cpu? */
+			if (run2 || pctcpu2 > pctcpu)
+				goto update_pickpr;
+
+			/* if p has less cpu or is zombie, then it's worse */
+			if (pctcpu2 < pctcpu || (pr->ps_flags & PS_ZOMBIE))
+				continue;
+update_pickpr:
+			pickpr = pr;
+			run = run2;
+			pctcpu = pctcpu2;
+		}
 
 		/* Calculate percentage cpu, resident set size. */
-		pctcpu = (pick->p_pctcpu * 10000 + FSCALE / 2) >> FSHIFT;
-		rss = pick->p_stat == SIDL || P_ZOMBIE(pick) ? 0 :
-		    vm_resident_count(pick->p_vmspace);
+		calc_pctcpu = (pctcpu * 10000 + FSCALE / 2) >> FSHIFT;
+		rss = (pickpr->ps_flags & (PS_EMBRYO | PS_ZOMBIE)) ? 0 :
+		    vm_resident_count(pickpr->ps_vmspace);
 
-		calctsru(&pick->p_p->ps_tu, &utime, &stime, NULL);
+		calctsru(&pickpr->ps_tu, &utime, &stime, NULL);
 
 		/* Round up and print user time. */
 		utime.tv_nsec += 5000000;
@@ -2159,89 +2210,54 @@ ttyinfo(struct tty *tp)
 			stime.tv_nsec -= 1000000000;
 		}
 
+		/*
+		 * Find the most active thread:
+		 *  - prefer runnable
+		 *  - prefer higher pctcpu
+		 *  - prefer living
+		 * Otherwise take the newest thread
+		 */
+		pick = p = TAILQ_FIRST(&pickpr->ps_threads);
+		if (p == NULL)
+			goto empty;
+		run = p->p_stat == SRUN || p->p_stat == SONPROC;
+		pctcpu = p->p_pctcpu;
+		while ((p = TAILQ_NEXT(p, p_thr_link)) != NULL) {
+			run2 = p->p_stat == SRUN || p->p_stat == SONPROC;
+			pctcpu2 = p->p_pctcpu;
+			if (run) {
+				/*
+				 * pick is running; is p running w/same or
+				 * more cpu?
+				 */
+				if (run2 && pctcpu2 >= pctcpu)
+					goto update_pick;
+				continue;
+			}
+			/* pick isn't running; is p running *or* w/more cpu? */
+			if (run2 || pctcpu2 > pctcpu)
+				goto update_pick;
+
+			/* if p has less cpu or is exiting, then it's worse */
+			if (pctcpu2 < pctcpu || p->p_flag & P_WEXIT)
+				continue;
+update_pick:
+			pick = p;
+			run = run2;
+			pctcpu = p->p_pctcpu;
+		}
+		state = pick->p_stat == SONPROC ? "running" :
+		        pick->p_stat == SRUN ? "runnable" :
+		        pick->p_wmesg ? pick->p_wmesg : "iowait";
+
 		ttyprintf(tp,
 		    " cmd: %s %d [%s] %lld.%02ldu %lld.%02lds %d%% %ldk\n",
-		    pick->p_comm, pick->p_pid,
-		    pick->p_stat == SONPROC ? "running" :
-		    pick->p_stat == SRUN ? "runnable" :
-		    pick->p_wmesg ? pick->p_wmesg : "iowait",
+		    pick->p_comm, pickpr->ps_pid, state,
 		    (long long)utime.tv_sec, utime.tv_nsec / 10000000,
 		    (long long)stime.tv_sec, stime.tv_nsec / 10000000,
-		    pctcpu / 100, rss);
+		    calc_pctcpu / 100, rss);
 	}
 	tp->t_rocount = 0;	/* so pending input will be retyped if BS */
-}
-
-/*
- * Returns 1 if p2 is "better" than p1
- *
- * The algorithm for picking the "interesting" process is thus:
- *
- *	1) Only foreground processes are eligible - implied.
- *	2) Runnable processes are favored over anything else.  The runner
- *	   with the highest cpu utilization is picked (p_estcpu).  Ties are
- *	   broken by picking the highest pid.
- *	3) The sleeper with the shortest sleep time is next.  With ties,
- *	   we pick out just "short-term" sleepers (P_SINTR == 0).
- *	4) Further ties are broken by picking the highest pid.
- */
-#define ISRUN(p)	(((p)->p_stat == SRUN) || ((p)->p_stat == SIDL) || \
-			 ((p)->p_stat == SONPROC))
-#define TESTAB(a, b)    ((a)<<1 | (b))
-#define ONLYA   2
-#define ONLYB   1
-#define BOTH    3
-
-static int
-proc_compare(struct proc *p1, struct proc *p2)
-{
-
-	if (p1 == NULL)
-		return (1);
-	/*
-	 * see if at least one of them is runnable
-	 */
-	switch (TESTAB(ISRUN(p1), ISRUN(p2))) {
-	case ONLYA:
-		return (0);
-	case ONLYB:
-		return (1);
-	case BOTH:
-		/*
-		 * tie - favor one with highest recent cpu utilization
-		 */
-		if (p2->p_estcpu > p1->p_estcpu)
-			return (1);
-		if (p1->p_estcpu > p2->p_estcpu)
-			return (0);
-		return (p2->p_pid > p1->p_pid);	/* tie - return highest pid */
-	}
-	/*
- 	 * weed out zombies
-	 */
-	switch (TESTAB(P_ZOMBIE(p1), P_ZOMBIE(p2))) {
-	case ONLYA:
-		return (1);
-	case ONLYB:
-		return (0);
-	case BOTH:
-		return (p2->p_pid > p1->p_pid); /* tie - return highest pid */
-	}
-	/*
-	 * pick the one with the smallest sleep time
-	 */
-	if (p2->p_slptime > p1->p_slptime)
-		return (0);
-	if (p1->p_slptime > p2->p_slptime)
-		return (1);
-	/*
-	 * favor one sleeping in a non-interruptible sleep
-	 */
-	if (p1->p_flag & P_SINTR && (p2->p_flag & P_SINTR) == 0)
-		return (1);
-	if (p2->p_flag & P_SINTR && (p1->p_flag & P_SINTR) == 0)
-		return (0);
-	return (p2->p_pid > p1->p_pid);		/* tie - return highest pid */
 }
 
 /*
@@ -2343,7 +2359,7 @@ ttyfree(struct tty *tp)
 	clfree(&tp->t_rawq);
 	clfree(&tp->t_canq);
 	clfree(&tp->t_outq);
-	free(tp, M_TTYS);
+	free(tp, M_TTYS, 0);
 }
 
 void
@@ -2352,8 +2368,8 @@ ttystats_init(struct itty **ttystats)
 	struct itty *itp;
 	struct tty *tp;
 
-	*ttystats = malloc(tty_count * sizeof(struct itty),
-	    M_SYSCTL, M_WAITOK);
+	*ttystats = mallocarray(tty_count, sizeof(struct itty),
+	    M_SYSCTL, M_WAITOK|M_ZERO);
 	for (tp = TAILQ_FIRST(&ttylist), itp = *ttystats; tp;
 	    tp = TAILQ_NEXT(tp, tty_link), itp++) {
 		itp->t_dev = tp->t_dev;
@@ -2401,7 +2417,7 @@ sysctl_tty(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		ttystats_init(&ttystats);
 		err = sysctl_rdstruct(oldp, oldlenp, newp, ttystats,
 		    tty_count * sizeof(struct itty));
-		free(ttystats, M_SYSCTL);
+		free(ttystats, M_SYSCTL, 0);
 		return (err);
 	    }
 	default:

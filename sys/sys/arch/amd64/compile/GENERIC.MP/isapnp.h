@@ -1,1 +1,0 @@
-#define	NISAPNP	0

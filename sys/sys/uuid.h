@@ -1,3 +1,4 @@
+/*	$OpenBSD: uuid.h,v 1.3 2014/08/31 09:36:39 miod Exp $	*/
 /*	$NetBSD: uuid.h,v 1.5 2008/11/18 14:01:03 joerg Exp $	*/
 
 /*
@@ -31,13 +32,25 @@
 #ifndef _SYS_UUID_H_
 #define	_SYS_UUID_H_
 
-#include <sys/cdefs.h>
-
 /* Length of a node address (an IEEE 802 address). */
 #define	_UUID_NODE_LEN		6
 
 /* Length of a printed UUID. */
-#define	_UUID_STR_LEN		38
+#define	_UUID_BUF_LEN		38
+
+#define PAD_(t) (sizeof(register_t) <= sizeof(t) ? \
+        0 : sizeof(register_t) - sizeof(t))
+
+struct  uuidgen_args {
+#ifdef _KERNEL
+        //struct sysmsg sysmsg;
+#endif
+        struct uuid *store;
+        char store_[PAD_(struct uuid *)];
+        int     count;
+        char count_[PAD_(int)];
+};
+
 
 /*
  * See also:
@@ -57,8 +70,10 @@ struct uuid {
 
 #ifdef _KERNEL
 
+typedef struct uuid uuid_t;
+
 #define	UUID_NODE_LEN	_UUID_NODE_LEN
-#define	UUID_STR_LEN	_UUID_STR_LEN
+#define	UUID_BUF_LEN	_UUID_BUF_LEN
 
 int	uuid_snprintf(char *, size_t, const struct uuid *);
 int	uuid_printf(const struct uuid *);
@@ -66,16 +81,16 @@ void	uuid_dec_be(const void *, struct uuid *);
 void	uuid_dec_le(const void *, struct uuid *);
 void	uuid_enc_be(void *, const struct uuid *);
 void	uuid_enc_le(void *, const struct uuid *);
-void	uuid_init(void);
-int	uuidgen(struct uuid *, int);
+
+int uuidgen(struct uuid *, int);
 
 #else	/* _KERNEL */
 
 typedef struct uuid uuid_t;
 
-__BEGIN_DECLS
+//__BEGIN_DECLS
 int	uuidgen(struct uuid *, int);
-__END_DECLS
+//__END_DECLS
 
 #endif	/* _KERNEL */
 
